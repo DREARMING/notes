@@ -1,0 +1,163 @@
+Android事件分发：
+
+
+ViewGroup的dispatchTouchEvent():
+
+public boolean dispatchTouchEvent(MotionEvent motionEve){
+	
+	//touch事件最后的处理结果
+	boolean handle = false;
+
+	int action = motionEvent & Motion.mask;
+
+	if(action == ACTION_DOWN){
+		//如果是down事件的话，就清空不允许父类拦截标志
+		resetDisallowParentIntercept();
+
+		//代表新一次触摸事件来临，清空以前的target和标志；
+		clearTargetAndState();
+	}
+
+	boolean intercept = false;
+
+	if(action == ACTION_DOWN || firstTouchTarget != null){
+
+		//子类阻止父类拦截touch事件，但不能阻止ACTION_DOWN事件，默认false
+		boolean disallowintercept = disallowFlag;
+
+		if(!disallowIntercept){
+			intercept = onInterceptTouchEvent(); //onInterceptTouchEvent默认返回false
+		}else{
+			intercept = false;
+		}
+	}
+
+	TouchTarget newTouchTarget = null;
+    boolean alreadyDispatchedToNewTouchTarget = false;
+
+    //如果没有拦截的话
+	if(!cancel && !intercept){
+		//在down事件没有被拦截时，寻找能够处理这事件的子view
+		if(action == ACTION_DOWN || action == ACTION_POINTER_DOWN){
+			View[] childs = getChilds();
+			for(int i = 0; i < childs.length; i++){
+				if(isInTouchRange(childs[i]) || isInAnimation(chils[i])){
+
+					if(dispatchTouchEventToChild(child)){
+						//发现处理down事件的view，直接交给它，并标志这次的touch事件已经分发成功。
+						newTouchTarget = child;
+
+						firstTouchTarget = newTouchTarget;
+
+						alreadyDispatchedToNewTouchTarget = true;
+					}
+
+				}
+			}
+		}
+	}
+
+	if(firstTouchTarget == null){
+		//如果没有子view处理down事件或者该viewgroup拦截了down事件的话,onTouchEvent执行.
+		//当前viewgroup拦截了touch事件，就会导致firstTouchTarget总是为null，所有传递到该viewgroup的事件都会直接调用到该方法
+		dispathTouchEventToThisView()
+	}else{
+		if(alreadyDispatchdToNewTouchTarget){
+			//down事件已经分发，不用处理
+			handle = true;
+		}else{
+			//一系列的move事件和up事件，分发到子view去
+			if(dispathEventToChild(firstTouchTarget)){
+			  handle = true;
+			}else{
+				handle = false;
+			}
+		}
+	}
+
+	if(action == ACTION_UP || action == ACTION_CANCEL){
+		//清除以前的状态标志
+		resetState();
+	}
+
+	return handle;
+}
+
+
+//------------------------------------------------------------------------------
+
+View的dispatchTouchEvent：
+public boolean dispatchTouchEvent(MotionEvent motionEvent){
+	boolean result = false;
+	ListenerInfo info = getListenerInfo;
+	//如果设置了touchListener的话，并且view是enanble的，那么touch事件先交由listener处理
+	if(info != null && info.touchListener != null && enable &&  touchLisener.touchEvent(motionEvent)){
+		result = true;
+	}
+
+	//如果没设置touchListener，或者设置了，但是touchListener返回false，执行View的onTouchEvent事件
+	if(!result && onTouchEvent(motionEvent)){
+		result  = true;
+	}
+
+	return resule;
+}
+
+//---------------------------
+
+View的 onTouchEvent 方法
+
+public boolean onTouchEvent(MotionEvent motionEvent){
+	if(disable){
+		//即使是disable状态，如果view是可点击或者可长按的话，都会消耗touch事件
+		return longClickable || clickable;
+	}
+	//在可点击和长按的情况，就一定会消耗事件
+	if(clickable || longClickable){
+		swich(action){
+			case up:
+				//如果前面还是处于按下状态的话，并且没执行过长按事件，执行点击事件
+				boolean isPrepressed = getPressed();
+				if(!hasLongClickPerformed){
+					removeLongClickCallback();
+					if(isPrepressed){
+						performClick();
+					}
+				}
+				removeTapCallBack();
+			break;
+
+			//-----------------------
+
+			case move:
+			//如果滑动了，并且移出了view所在范围，那么取消长按监听器，并且将按钮的按下状态还原
+			if(!inPointView(x,y,touchSlop)){
+				setPressed(false);
+				removeLongClickCallBack();
+			}
+			break;
+
+			//---------------------------
+			case cancel:
+				setPressed(false);
+				removeLongClickCallBack();
+				//移除单击事件监听
+				removeTabCallBack();
+			break;
+
+			//-------------------------------
+
+			case down:
+			if(!isInScroolContainer){
+				//如果处于非scroll容器里面，那么接受down事件后，使按钮处于按下状态
+				setPressed(true);
+
+				//执行长按监听任务，如果到达临界点，执行长按事件
+				checkForLongClick();
+			}
+			break;
+		}
+		return true;
+	}
+	return false;
+}

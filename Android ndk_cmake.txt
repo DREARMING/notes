@@ -1,0 +1,117 @@
+1. 如何指定需要编译的文件，文件包括如何指定多个文件，或者一个目录下的所有代码？
+2. 如何生成so库或者静态库，并制定其输出目录
+
+// 创建native-lib库目标，并制定其编译单个源文件
+add_library(native-lib SHARED native-lib.cpp)
+
+//编译多个源文件的方式
+# 查找所有源码 并拼接到路径列表 
+aux_source_directory(${CMAKE_HOME_DIRECTORY}/src/api SRC_LIST) 
+aux_source_directory(${CMAKE_HOME_DIRECTORY}/src/core CORE_SRC_LIST) 
+
+list(APPEND SRC_LIST ${CORE_SRC_LIST})
+
+//增加该库的编译路径
+add_library(native-lib SHARED ${SRC_LIST})
+
+//定义一个变量，它指向跟app同目录下的distribution目录
+set(distribution_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../distribution)  
+								
+//将distribution/lib目录作为库文件的输出目录。并且区分abi平台
+set_target_properties(native-lib
+                      PROPERTIES
+                      LIBRARY_OUTPUT_DIRECTORY
+                      "${distribution_DIR}/lib/${ANDROID_ABI}")
+
+一般来说，我们对主要导出的native-lib不需要指定其输出目录，它默认会被打包进apk包中的libs
+参考7，配置native-lib为导出到apk的库和其依赖关系
+
+3. 如何配置ndk，选择性导出不同abi的so库
+见下面
+
+4. 如何指定cmakelistfile文件位置。
+Android{
+
+	defaultConfig{
+
+		ndk{
+			abiFilters 'armeabi-v7a','armeabi','x86'  //导出这3个平台的so库，减少apk的大小
+		}
+		externalNativeBuild{
+			cmake{
+				target 'native-lib'  //指定编译的库目标是native-lib，否则编译cpp下所有库
+			}
+		}
+	}
+
+	externalNativeBuild{
+		path 'src/main/cpp/CMakeList.txt'  //cmakelist file位置
+	}
+}
+
+5. 如何导入so库，a库，并且制定其导入的位置。
+add_library(lib_gperf SHARED IMPORTED)   //创建lib_gperf为一个可导入的so库目标
+
+//指定库目标的位置
+set_target_properties(lib_gperf PROPERTIES IMPORTED_LOCATION
+    ${distribution_DIR}/gperf/lib/${ANDROID_ABI}/libgperf.so)
+
+
+
+6. 如何配置要导出到apk的target库？以及配置该库的依赖关系？
+target_link_libraries(native-libs  //第一个参数是target库，后续的是依赖库
+                      lib_gmath
+                      lib_gperf
+                      log)
+链接 lib_gmath、lib_gpref、log库目标到native-libs，即配置native-lib的依赖
+
+7. copy文件
+add_custom_command(TARGET target-lib POST_BUILD COMMAND "${CMAKE_COMMAND}" -E copy "sourfile" "destinatitonFile")
+
+target-lib 是指目标库， POST_BUILD是指目标库build完之后，即生成了so库或a库之后执行后面的指令
+${CMAKE_COMMAND} 通过 -E参数可以调用系统的命令行参数
+"${CMAKE_COMMAND}" -E copy 这句话就是调用系统的copy命令，将源文件复制到指定位置
+
+
+8. 指定头文件位置
+
+//第一种方式是：
+include_directories(src/main/cpp/include/)
+
+//第二种方式
+target_include_directories(native-libs  PRIVATE 
+					src/main/cpp/include1/
+					src/main/cpp/include2/)
+
+
+9. cmake一些常量
+CMAKE_HOME_DIRECTORY  -- 指CMakeList.txt文件所在的目录，即库的根目录，如app目录
+ANDROID_ABI  -- 在输出不同abi的so库时，这个常量代表当前输出的abi模式
+CMAKE_COMMAND -- cmake可执行文件的路径，一般用来调用系统命令，比如copy
+
+10. 找系统预编译的库，生成库目标
+find_library( # Sets the name of the path variable.
+              log-lib
+
+              # Specifies the name of the NDK library that
+              # you want CMake to locate.
+              log )
+
+11. cmake的条件语句，变量定义，
+set(variable value...)
+
+set(destribution_dir "src/../distribution/")  //添加destribution变量，指示一个字符串
+
+set(destribution_dir)  //不指定value,代表删除变量
+
+//条件语句
+if(expression)
+else if(expression)
+endif(expression)
+
+12. log日志，输出日志的位置在哪里？
+语法：message([STATE|WARNING|FATAL_ERROR] "message")
+例子：message(STATE "hello cmake log")
+查询日志的地方在：.externalNativeBuild/cmake/debug/{abi}/cmake_build_output.txt
+
+13. C++编译参数有哪些

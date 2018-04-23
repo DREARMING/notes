@@ -1,0 +1,40 @@
+消息流ID
+消息流ID可以是任意值。当同一个块流被复用到不同的消息流中时，可以通过消息流ID来区分它们。另外，对于RTMP块流而言，这是一个不透明值。该字段占用4字节，使用小端序。
+
+握手完成之后，此连接可以复用于一到多个块流。每个块流携带一个消息流的某种类型的消息。块通过网络进行传输。传输过程中，每个块必须被完整的发送后，才能发送下一个块。接收端接收完成之后，根据块流ID把块组装成完整的消息。
+
+
+
+chunk streamid == 2 的chunk流  负责传输rtmp的协议控制信息， 该chunk流负责复用message stream id = 0的信息流控制指令  --拥有最高优先级
+
+
+协议控制消息  - msg streamd id = 0, chunk stream id =0
+元数据信息  -- 流的信息，metadata、分辨率、视频名等
+共享消息
+音频消息 -- 音频信息
+视频消息 -- 视频消息
+聚集消息 
+命令消息 - start、play、publish等
+
+
+flvTagType
+分为三种数据：
+音频数据、视频数据、视频信息数据(meta data)
+
+Flv{
+	boolean dropable; //是否可以丢弃的帧
+	int timestamp;	 //时间戳
+	byte[] byteBuffer; //数据
+	boolean isKeyFrame; //是否是关键帧
+	boolean flvTagType;  //音频、视频、原数据类型
+	int videoFrameType;  //关键帧、B、P帧这些参考帧类型
+}
+
+rtmp[]://hostname[:port]/appname/flv:streamname  optArgs
+
+关于rtmp的URL解析，optArgs含义，请看霄骅的RTMPdump使用说明
+
+流程：
+
+解析URl做的事情
+1. 

@@ -1,0 +1,143 @@
+/--------JNI-------------
+JniEve 
+ThreadLocal变量，线程私有，避免并发引起错误
+
+jni作为native和java的中间层，承担着交互媒介的作用。
+jni需要解决如下几个问题：
+
+1. 关联java方法和jni函数(java native方法的实现)
+
+在这里涉及到问题是：java层如何找到jni层定义的函数？jni层如何找到java层方法呢？
+jni在这里定义了 jni函数和java方法的命名规则，java方法可以通过方法签名和方法名找到jni函数；jni可以通过函数签名和函数名找到java方法。
+
+//jni层定义java和jni函数的协议
+
+typedef struct {
+    const char* name;  // java方法的名字
+    const char* signature;  // java方法的签名
+    void*       fnPtr;  //java方法在native层的函数指针
+} JNINativeMethod;
+
+举个例子：
+JNINativeMethod getMethods[10] = {
+	{"start","()V", (void*)com_creator_mainactivity_start}
+};
+
+start()方法是MainActivity的java native方法；
+()V 是start方法的签名
+(void*)com_creator_mainactivity_start 是jni层实现start方法的函数指针
+
+关于签名：
+I - int  除了特殊情况，一般是基本类型的首字母的大写
+F - float
+
+一些特别的情况
+
+V - void
+L - 引用型 比如String Ljava/lang/String; //;号不能省略，也是其签名的一部分
+J - long
+Z - boolean
+[ - 一维Array 
+[[ - 二维Array //多维数组往后添加
+
+
+有了上面的协议，就可以通过方法名和方法签名找到jni的函数指针
+
+JNINativeMethod这个数据结构可以解决静态注册jni方法一些弊端。
+
+静态注册jni方法，通过编译java类文件，生成头文件后再引入头文件完成java native方法的jni层实现
+静态注册会在第一次调用jni的具体函数时，都要保存jni函数的指针，方便后面继续调用。
+
+而通过JniEve.registerNative(jclass,JNINativeMethod*,jsize) 可以通过动态注册，在so库加载时的onload函数中注册这些函数对应关系，就可以避免头文件这种繁琐的声明
+
+JniEve.unregisterNative(jclass) 取消注册
+
+
+2. 数据类型转换和基本操作
+java方法和jni函数的相互调用通常涉及到参数之间的传递，然而C/C++和java的数据类型是不一样的，而通过 JniEvn 的jni函数可以实现他们的数据结构之间的转换
+
+java的数据类型在jni层的表示基本规则是:
+
+数据类型是基本类型则在其前面+j
+比如 int  <==> jint
+jni通过 typedef 关键字来定义jint, 其实等价关系如下 
+
+jint -> singed int_32 -> singed int
+
+jchar -> unsigned int_16 -> unsigned short
+
+//---->
+
+而引用类型则统一用jobject表示
+
+jclass jni为class类型定义了数据类型
+
+String类也是引用类型，但是因为太频繁使用的缘故，jni为它定义了jstring这个数据类型来表示
+
+数组虽然也是引用类型，但是通过如下规则表示
+int[] <==> jintArry  //j + 基本数据类型 + Array
+
+基本类型之间的转换已经通过typedef定义了C/C++的基本类型与java基本类型之间的转换，主要是解决引用类型的转换和基本操作
+
+jstring 可以通过 env->GetStringUTFChars(jstring) 获取到 const char* ，得到指向jstring的char*，注意记得释放内存 env->ReleaseStringUTFChars(jstring,char*);
+
+同样可以通过 env->NewStringUTF(char*) 将字符串转换成jstring
+
+
+C是非面向对象语言，没有对象这一说法，下面是C/C++在jni层解决对象方面的一些方案：
+
+调用类的静态方法/对象的方法：
+jmethodID methodId = env-> GetMethodID(jclass,char* methodName, char* signature); //参数分别是对象所在的类, 方法名，方法签名
+env->callVoidStaticMethod(jclass,jmethodID,arg) // 调用类的静态无返回值方法，参数是该类的类型，方法Id，参数（jvalue,是java在jni的类型）
+env->callIntMethod(jobject,jmethodID,arg)  //调用对象，对象的方法，方法参数
+
+
+设置和访问类的静态域或者对象的field
+
+jfiledID fieldID = env->GetFiledID(jclass, char* fieldNmae, char* signature)
+env->setStaticBooleanFiled(jclass,filedID,arg) //设置类的静态Boolean域
+env->setBooleanFiled(jobject,filedID,arg) //设置对象的boolean域
+
+类关系
+env->IsInstanceOf(jobject,jclass) //判断类对象是否是某个类或接口的实现类
+env->ISSameObject(jobject,jobject) //判断两个对象是否相等
+env->IsAssignableFrom(jclass1,jclass2) //判断jclass1是不是jclass2的父类、同类或接口父类
+
+创建对象
+env->NewObject(jclass,jmethodID,arg) //构造兑现的类，构造函数，构造参数
+
+持有引用， 在jni里面，
+globalRef=jobject是不会添加增加引用计数器的值的，也就说虚拟机在java层发现引用计数器指为0，将对象回收，这就有可能造成jni保存了globalRef成了野指针，导致访问出错
+env->NewGlobalRef(jobject) // 创建一个全局引用，可以将引用计数器的值增加1
+env->NewLocalRef(jobjct) //创建一个局部引用
+这种方式持有引用必须注意销毁，防止jni泄露内存
+
+env->DeleteGlobalRef(jobject) //删除全局引用 --一般在析构函数中处理
+env->DeleteLocalRef(jobject) //删除局部引用   
+
+
+-------------------------
+关于异常：
+
+jni内部运行过程中如果发生异常注意要回收资源
+
+jni内部发生异常，不会中止程序的执行，而是会继续往下执行，
+所以再调用jni方法后，要注意检查异常情况，如果发生了的话，则return，结果函数执行。
+
+1. exceptionCheck : boolean 检查是否发生异常
+2. exceptionDescribe :void 打印异常
+3. exceptionClear : void 清除异常缓冲区
+4. ThrowNew(jclass, const char*) 在java层抛出异常信息
+5. fatalError(const char*) 中止程序执行
+
+
+
+-----------------------------
+
+jni库加载
+
+在java层只需要调用System.loadLibrary("libname"); //libname库名，忽略lib前缀，和.so后缀
+一般在类的静态块里面调用
+
+jni库加载成功后，会默认调用函数：//上面说过动态注册jni方法时，这是一个最合适的时机
+jint JNI_OnLoad(JavaVM* vm, void* reserved){...}
