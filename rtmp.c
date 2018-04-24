@@ -61,7 +61,7 @@
 typedef struct RTMP
   {
     int m_inChunkSize;
-    int m_outChunkSize;
+    int m_outChunkSize;     //chunk size，大于chunksize的块都会被分割成chunksize大小
     int m_nBWCheckCounter;
     int m_nBytesIn;
     int m_nBytesInSent;
@@ -85,7 +85,7 @@ typedef struct RTMP
     int m_channelsAllocatedIn;
     int m_channelsAllocatedOut;
     RTMPPacket **m_vecChannelsIn;
-    RTMPPacket **m_vecChannelsOut;
+    RTMPPacket **m_vecChannelsOut;  //是指向存储不同CSID的RTMPPacket指针的指针，每个RTMPPacket指针指向不同chunk流下最新的发送的chunk块，用于压缩每个chunk块的大小，chunk块可以依赖上一个chunk块
     int *m_channelTimestamp;    /* abs timestamp of last packet */
 
     double m_fAudioCodecs;  /* audioCodecs for the connect packet */
@@ -102,8 +102,8 @@ typedef struct RTMP
 
     RTMP_READ m_read;
     RTMPPacket m_write;
-    RTMPSockBuf m_sb;
-    RTMP_LNK Link;
+    RTMPSockBuf m_sb;       //C Socket对象，用来发送和读取数据
+    RTMP_LNK Link;          //rtmp url的解析大部分就是为了构造此对象，它包括协议、hostname、port、 Connection命令的参数（在rtmp握手成功后第一个发送的命令），还有其他 = 的option参数（包括app名字，flash版本号，编解码器）
     //lake
     char ipaddr[16];
   } RTMP;
@@ -118,19 +118,20 @@ typedef struct RTMP
     char c_header[RTMP_MAX_HEADER_SIZE];
   } RTMPChunk;
 
-  typedef struct RTMPPacket
-  {
-    uint8_t m_headerType;
-    uint8_t m_packetType;
-    uint8_t m_hasAbsTimestamp;  /* timestamp absolute or relative? */
-    int m_nChannel;
-    uint32_t m_nTimeStamp;  /* timestamp */
-    int32_t m_nInfoField2;  /* last 4 bytes in a long header */
-    uint32_t m_nBodySize;
-    uint32_t m_nBytesRead;
-    RTMPChunk *m_chunk;
-    char *m_body;
-  } RTMPPacket;
+    //Chunk块信息
+      typedef struct RTMPPacket
+      {  
+        uint8_t m_headerType;//ChunkMsgHeader的类型（4种）  
+        uint8_t m_packetType;//Message type ID（1-7协议控制；8，9音视频；10以后为AMF编码消息）  
+        uint8_t m_hasAbsTimestamp;  /* Timestamp 是绝对值还是相对值? */  
+        int m_nChannel;         //块流ID  
+        uint32_t m_nTimeStamp;  // Timestamp  
+        int32_t m_nInfoField2;  /* last 4 bytes in a long header,消息流ID */  
+        uint32_t m_nBodySize;   //消息长度  
+        uint32_t m_nBytesRead;  
+        RTMPChunk *m_chunk;  
+        char *m_body;  
+      } RTMPPacket;  
 
 
   typedef struct AMFObject
@@ -167,3 +168,14 @@ typedef struct RTMPSockBuf {
     int sb_timedout;    
     void *sb_ssl;
 } RTMPSockBuf;
+
+
+
+connect 命令消息
+packet.m_nChannel = 0x03;    /* control channel (invoke) csid */
+    packet.m_headerType = RTMP_PACKET_SIZE_LARGE;  //header type 0类型，messageHeader占11字节
+    packet.m_packetType = RTMP_PACKET_TYPE_INVOKE;  //commandMessage  信息类型
+    packet.m_nTimeStamp = 0;             //时间戳
+    packet.m_nInfoField2 = 0;           //信息流id msid
+    packet.m_hasAbsTimestamp = 0;       //是否是绝对时间
+    packet.m_body = pbuf + RTMP_MAX_HEADER_SIZE;   //最大占18字节的头部 （type = 2 basicHeader(3byte) + messageHeader(11) + extendsStamp(4)）

@@ -38,3 +38,57 @@ rtmp[]://hostname[:port]/appname/flv:streamname  optArgs
 
 解析URl做的事情
 1. 
+
+
+
+AMF数据格式:https://blog.csdn.net/ddr77/article/details/52355337
+
+Number 		0×00 	double类型
+Boolean 	0×01 	bool类型
+String 		0×02 	string类型
+Object 		0×03 	object类型
+MovieClip 	0×04 	Not available in Remoting
+Null 		0×05 	null类型，空
+Undefined 	0×06 	
+Reference 	0×07 	
+MixedArray 	0×08 	
+EndOfObject 	0×09 	See Object ，表示object结束
+Array 		0x0a 	
+Date 		0x0b 	
+LongString 	0x0c 	
+Unsupported 	0x0d 	
+Recordset 	0x0e 	Remoting, server-to-client only
+XML 		0x0f 	
+TypedObject (Class instance) 	0×10 	
+AMF3 data 	0×11 	
+
+AMF的数据类型 + [AMF数据的长度（string和object需要有，但是boolean类型因为已经明确是一字节的了）] + AMF数据b + [数据类型结尾（object类型才有）]
+
+比如一个在rtmp中的连接参数Connection,它有1个子参数app，appname="flash"
+
+0x02 	0x0A connectionbytes   0x01 		0x03  0x02  		0x07 appnamebytes 0x03 0x05 flashbytes 0x00 0x00 0x09
+|	  	  |			|			|		    |      |    		|     |           |    |      | 		  |		
+string  10bytes    string      1个对象		Object stringtype	7len	 								000009对象类型结束标志
+type      leng     content
+
+
+/**
+     * 建立连接的步骤：
+     * 1. 建立socket连接
+     * 2. rtmp握手  //意义：如tcp握手时确保网络和tcp协议版本这些都是可以交流的，rtmp握手也是如此，是确保版本可以解析
+     *      1.客户端发送 c0、c1       //c0、s0都是携带rtmp版本号
+     *      2.服务器 回复 s0、s1
+     *      3. 客户端发送c2 == s1
+     *      4. 服务器回复s2 == c1
+     *      5. 校验 s2 == c1,成功则代表rtmp握手ok
+     * 3. 发送Connect命令，用于初始化连接。而这些连接需要的参数都是从url解析出来的Link的参数
+     * 4. Connect命令封装成RTMPPacket，相当于chunk块，发送RTMPPacket 的流程如下：
+     *     1.先判断rtmp.m_vecChannelsOut是否保存有同chunk流最新发送的chunk块，如果发现chunk流id越标，增加数组长度，如果有，记为
+     *     prePacket,并且改变header_type,headerType影响Message header占的字节数，并且当前chunk的时间戳可以相对于prePacket的时间戳
+     *     2.根据headerType选择该chunkHeader最小的长度，即csid默认认为占一字节、extends stamp默认没有。
+     *     3.计算 时间戳，是否超过 0xfffff，超过header size增加4字节用来保存extend stamp
+     *     4. 计算csid，大于319增加两字节保存csid，大于63，增加一字节。到此chunkHeader的大小已确定
+     *     5. 填充chunk basic header，根据csid扩展的字节数判断是否需要填充时间戳，message长度，messageType，message streamd id等信息
+     *     6. 对chunkData的大小进行判断，如果大于chunk size，在while循环分割，然后发送出去。分隔的块用headerType == 3模式分割，不存在message header
+     *     7. 保存当前RTMPPacket到rtmp.m_vecChannelsOut中
+     */
