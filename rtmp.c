@@ -5,21 +5,23 @@
 
     AVal playpath0;	/* parsed from URL */
     AVal playpath;	/* passed in explicitly */
-    AVal tcUrl;
-    AVal swfUrl;
-    AVal pageUrl;
-    AVal app;
-    AVal auth;
+    AVal tcUrl;     //目标流地址
+    AVal swfUrl;   //没必要传输
+    AVal pageUrl;  //没必要传输
+    AVal app;       //要在服务器中哪个应用程序找这个视频源
     AVal flashVer;
     AVal subscribepath;
+
+    AVal auth;         //用于安全验证
     AVal usherToken;
     AVal token;
     AVal pubUser;
     AVal pubPasswd;
+
     AMFObject extras;
     int edepth;
 
-    int seekTime;
+    int seekTime;       //会话参数
     int stopTime;
 
 #define RTMP_LF_AUTH	0x0001	/* using auth param */
@@ -82,8 +84,8 @@ typedef struct RTMP
     int m_numCalls;
     RTMP_METHOD *m_methodCalls; /* remote method calls queue */
 
-    int m_channelsAllocatedIn;
-    int m_channelsAllocatedOut;
+    int m_channelsAllocatedIn;  //当前用来保存csid的输入流的指针有多少个
+    int m_channelsAllocatedOut; //当前用来保存csid的输出流的指针有多少个
     RTMPPacket **m_vecChannelsIn;
     RTMPPacket **m_vecChannelsOut;  //是指向存储不同CSID的RTMPPacket指针的指针，每个RTMPPacket指针指向不同chunk流下最新的发送的chunk块，用于压缩每个chunk块的大小，chunk块可以依赖上一个chunk块
     int *m_channelTimestamp;    /* abs timestamp of last packet */
@@ -132,14 +134,6 @@ typedef struct RTMP
         RTMPChunk *m_chunk;  
         char *m_body;  
       } RTMPPacket;  
-
-
-  typedef struct AMFObject
-  {
-    int o_num;
-    struct AMFObjectProperty *o_props;
-  } AMFObject;
-
 
 
 typedef struct AMFObject {

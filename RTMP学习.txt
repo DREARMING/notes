@@ -92,3 +92,19 @@ type      leng     content
      *     6. 对chunkData的大小进行判断，如果大于chunk size，在while循环分割，然后发送出去。分隔的块用headerType == 3模式分割，不存在message header
      *     7. 保存当前RTMPPacket到rtmp.m_vecChannelsOut中
      */
+    
+
+
+
+
+关于rtmp协议的作用分析：
+
+协议，规范化信息交流所制定的规约，rtmp用于流媒体资源的传输
+
+音视频数据量的传输，量大而频繁，在低带宽上进行传输，很可能因为前面一些大数据量的信息被
+
+
+rtmp支持在连接时校验token等，避免其他人获取该流，增加服务器负担。
+
+
+rtmp播放可以指定播放流或者点播视频，还可以指定起始时间，播放的时常等
