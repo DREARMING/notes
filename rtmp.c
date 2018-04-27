@@ -73,14 +73,14 @@ typedef struct RTMP
     uint32_t m_mediaStamp;
     uint32_t m_pauseStamp;
     int m_pausing;
-    int m_nServerBW;
-    int m_nClientBW;
+    int m_nServerBW;        //window ack size
+    int m_nClientBW;        //set peer band
     uint8_t m_nClientBW2;
     uint8_t m_bPlaying;
     uint8_t m_bSendEncoding;
     uint8_t m_bSendCounter;
 
-    int m_numInvokes;
+    int m_numInvokes;   //发送了多少个调用函数给服务器。
     int m_numCalls;
     RTMP_METHOD *m_methodCalls; /* remote method calls queue */
 
