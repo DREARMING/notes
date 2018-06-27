@@ -4,6 +4,7 @@ StreamLiveCameraView
 
 
 rtmp://192.168.3.83:1935/live/live1
+rtmp://live.hkstv.hk.lxdns.com/live/hks
 
 
 

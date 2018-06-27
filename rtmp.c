@@ -163,7 +163,36 @@ typedef struct RTMPSockBuf {
     void *sb_ssl;
 } RTMPSockBuf;
 
+/* state for read() wrapper */
+typedef struct RTMP_READ {
+    char *buf;
+    char *bufpos;
+    unsigned int buflen;
+    uint32_t timestamp;
+    uint8_t dataType;
+    uint8_t flags;
+#define RTMP_READ_HEADER    0x01
+#define RTMP_READ_RESUME    0x02
+#define RTMP_READ_NO_IGNORE    0x04
+#define RTMP_READ_GOTKF        0x08
+#define RTMP_READ_GOTFLVK    0x10
+#define RTMP_READ_SEEKING    0x20
+    int8_t status;
+#define RTMP_READ_COMPLETE    -3
+#define RTMP_READ_ERROR    -2
+#define RTMP_READ_EOF    -1
+#define RTMP_READ_IGNORE    0
 
+    /* if bResume == TRUE */
+    uint8_t initialFrameType;
+    uint32_t nResumeTS;
+    char *metaHeader;
+    char *initialFrame;
+    uint32_t nMetaHeaderSize;
+    uint32_t nInitialFrameSize;
+    uint32_t nIgnoredFrameCounter;
+    uint32_t nIgnoredFlvFrameCounter;
+} RTMP_READ;
 
 connect 命令消息
 packet.m_nChannel = 0x03;    /* control channel (invoke) csid */
