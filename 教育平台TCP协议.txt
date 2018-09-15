@@ -1,0 +1,76 @@
+
+TCP消息
+
+文件名命名： 前缀_GUID_.后缀
+
+测试Demo: 
+前缀是：edutest
+GUID: UUID（全球唯一id） -- UUID.randomUUID()
+后缀：暂定aac
+
+sender_id : 2 Android
+
+备课id : 1 
+
+--------------------------------------
+
+语音消息
+
+total_length -- 4 指令总长度
+
+command_type -- 7 指令类型	file
+
+sender_id -- 8
+
+备课id -- 4
+
+file_type -- 7    filetype : audio
+
+is_show -- 1  
+
+filename_length -- 4  
+filename_content -- 
+
+file_content_length -- 4
+file_content
+
+send_time -- 8
+
+extra_length -- 4
+entra_content --
+
+语音文本消息：
+extra_content中首个4字节，代表语音的时长
+
+--------------------------------------
+
+
+文本消息
+
+total_length -- 4 指令总长度
+
+command_type -- 7 指令类型  txt
+
+sender_id -- 8
+
+备课id -- 4
+
+content_length -- 4
+content
+
+send_time -- 8
+
+extra_length -- 4
+entra_content --
+
+-------------------------------------------------
+
+心跳包
+
+total_length -- 4 指令总长度
+
+command_type -- 7 指令类型 heart
+
+sender_id -- 8
+
+-------------------------------------

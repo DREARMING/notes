@@ -21,7 +21,6 @@ public boolean dispatchTouchEvent(MotionEvent motionEve){
 	boolean intercept = false;
 
 	if(action == ACTION_DOWN || firstTouchTarget != null){
-
 		//子类阻止父类拦截touch事件，但不能阻止ACTION_DOWN事件，默认false
 		boolean disallowintercept = disallowFlag;
 
@@ -51,7 +50,6 @@ public boolean dispatchTouchEvent(MotionEvent motionEve){
 
 						alreadyDispatchedToNewTouchTarget = true;
 					}
-
 				}
 			}
 		}
@@ -66,8 +64,8 @@ public boolean dispatchTouchEvent(MotionEvent motionEve){
 			//down事件已经分发，不用处理
 			handle = true;
 		}else{
-			//一系列的move事件和up事件，分发到子view去
-			if(dispathEventToChild(firstTouchTarget)){
+			//一系列的move事件和up事件，分发到子view去,（但是事件被ViewGroup拦截，就会发送cancel事件给子view，然后回调该ViewGroup的onTouchEvent）
+			if(dispathEventToChild(firstTouchTarget,intercept)){
 			  handle = true;
 			}else{
 				handle = false;
