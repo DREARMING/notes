@@ -85,3 +85,34 @@ ijkplayer:
 3. 创建surfaceView或者sufaceTexture用来显示预览画面，setDisplay、setDisplayOrientation
 
 4. 可以设置previewCallBack来获取预览的每一帧图片，然后可以在这里编码、推流或存储
+
+
+
+音视频控件全屏的方案：
+1. 首先当控件按了全屏按钮之后，手动设置屏幕方向：
+调用activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
+
+2. 当界面发生屏幕转变后，activity里面的子视图就会收到 onConfigurationChanged(Configuration newConfig)回调，只需要覆盖父View的方法即可。可以在这个方法里面回调视频控件的全屏方法，让布局发生切换变更，同时需要设置窗口为全屏。
+需要注意的是：需要在Activity的manifest文件中添加对该Activity的configure添加拦截处理，否则activit会直接被销毁，不回调onConfigurationChanged方法
+
+3. 需要注意的事情是，调用setRequestOriendtation后，屏幕方向再也不能跟随手机旋转发生变化了。
+
+4. 加入上述3情况发生了，但是还想监听手机旋转造成屏幕旋转这种情况的话，可以设置setOrientationEventListener来解决
+
+
+音视频声音控制：
+通过调用 audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) 获取MUSIC这个输出流的声音大小
+通过调用 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, index, 0); //index == 声音大小
+
+音视频屏幕亮度控制：
+//首先获取窗口属性
+WindowManager.LayoutParams lpa = mActivity.getWindow().getAttributes();
+brightness = getWindow().getAttributes().screenBrightness;
+lpa.screenBrightness = brightness + percent;		// scrennBrightness的取值范围在0-1之间
+getWindow().setAttributes(lpa);
+
+
+音视频滑动控制亮度和声音、播放进度
+首先对整个布局设置手势监听：
+1. 发生scroll事件，并且是横向的，则在手势结束的时候，发送handler消息去设置播放进度。
+2. 如果是 vertical 方向发生滑动，右边是声音，左边是亮度，都是通过滑动距离和控件Y高度的百分比，来决定亮度和声音的大小。
