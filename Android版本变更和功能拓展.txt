@@ -14,7 +14,7 @@ open_document，实现DocumentProvider，借助系统UI实现选择图片，还�
 
 3. 沉浸式体验。透明状态栏和导航栏。
 
-4. chromnWebview webview基于chronm内核
+4. webview基于chronm的源代码快照，意味着性能提升了，然后需要做下兼容处理。
 
 5. 开发过程中添加录屏功能，在sdk的工具中adb shell screenrecord	提供支持
 
@@ -46,7 +46,7 @@ Lollipop 5.0 - 5.1变更和优化  21-22  （堪称最大更新）
 1. Material Design的引入
 
 2. 性能
-切换运行时从dalvik -> ART，预先编译 AOT -> ART（jit提供函数预编译和缓存）
+切换运行时从dalvik -> ART，预先编译 AOT
 64位架构支持
 
 3. 通知
@@ -166,9 +166,126 @@ openSSL迁移到 boringSSL，在jni调用openssl的需要注意，可以调用ja
 --------------------------------------------------
 
 
-Android 7.0 -- Android N
+Android 7.0 -- Android N  -- 24
 
-Android 8.0 -- Android O
+1. 比6.0版本的低耗电 更严格的 低耗电模式
+1. 以前是静止不动才会进入低耗电模式，现在放进袋子里，走路也会发生这种情况。
+2. 以前充电是不会进低耗电模式的，现在插电一段时间，没有操作，也会被判定进入低耗电模式。
+
+2. 私有文件权限问题
+为了提高私有文件的安全性，文件的共享，需要借助FileProvider，否则会引起 FileNotExposeException
+私有文件包括：应用内部存储文件/data/data/[package] 和外部存储私有目录文件 /data/data/Android/[package]/xxx/
+私有文件不再能创建全局访问属性，比如 world_read/world_write
+
+对于向外提供的文件uri ： file：//... 会被拒绝访问，运行时错误，必须借助FileProvider进行提供文件Uri
 
 
-Android 9.0 -- Android P
+3. 禁止应用动态链接私有第三方库。 所有库必须打包到 apk中。
+
+4. 移除了3个静态广播，需要在app动态注册
+1. 网络连接改变广播 CONNECTIVE_ACTION
+2. ACTION_NEW_PICTURE 和 ACTION_NEW_VIDEO
+
+5. 禁止在 binder 中传递过大的数据量，将会造成运行时错误。
+
+6. 多窗口支持
+就是同一个屏幕可以执行两个应用
+
+7. 通知功能增加
+1. 模板更新
+2. 直接回复
+3. 捆绑通知
+4. 自定义视图
+
+
+7. 添加 jit ，优化运行时代码编译，从 Aot -> jit，执行代码更快，安装速度更快
+
+8. SurfaceView性能优化
+7.0后，推荐用SurfaceView 替代TextureView，更加省电，以前SurfaceView产生黑边和无法移动的问题已被修复。
+
+
+9. 快速设置图标可以移动和添加自己的快速设置图标
+就是wifi图标、闪光灯图标这些可以由用户移动位置了。
+
+10. 号码屏蔽、来电拦截
+
+11. webview利用手机上的chromn apk进行更新。。 估计没什么卵用，并不是每个app装chromn
+
+
+12 opengl 3.2引入
+
+13. apk v2 签名引入
+更快速安装应用，对应用内的文件保护得更加安全
+
+14. 网络安全性配置
+文件配置 Ca证书、限制明文传输等配置。
+
+
+
+---------------------------------------------------
+
+
+
+Android 8.0 -- Android O   -- 26
+
+功能更新：
+
+1. 画中画模式
+
+2. 通知又变更，添加了新的api
+一、 通知渠道
+二、 通知标志 -- 应该类似于未读信息一样的红点标志
+三、 通知超时
+
+3. 自动填充框架
+
+4. 可下载字体
+
+5. 多显示器支持 -- 对无纸化的双屏显示器处理？
+
+6. 统一布局外边距和内边距
+layout_marginVertical <==> layout_marginTop and layout_marginBottom
+
+7. AnmatorSet增强，可以直接倒播动画
+不用定义两个相反的动画，比如播放器的标题栏自动出现和消失两个相反的动画
+
+8. ContentProvider
+提供分页功能
+内容刷新请求
+
+9. JobScheduler 改进
+1. 添加新的约束条件： 存储空间低的时候不执行、电量低时不执行、需要一个计费网络
+2. ClipData支持，通过URL权限授予工作列队的Intent
+
+10. findViewById的签名变更了
+<T extends View> T findViewById(int id)
+
+
+11. 增强 SAF 功能
+1. 对存储在云端的文件无法提供 文件描述符的， 可以借助自定义 DocumentProvider解决。
+
+12. 安全
+新的账号访问和 DiscoverApi
+
+
+行为变更：
+
+1. 后台执行变更：
+一、 后台的应用，无法执行大部分 在manifest声明的 隐式Intent 广播
+二、 对于没有活动组件的应用，在一定时间过后，其所有唤醒锁将会被取消
+三、 服务变成后台后，一定时间后，将会被限制服务的访问，等于调用了stopSelf。 （草，这变更很严重）
+1. 可以考虑用 JobScheduler 替换, 执行期间具备cpu、网络获取
+2. 考虑用NotificationManager.startServiceInForeground(),启动前台服务，在应用栏显示一个通知，让服务正常运作。
+
+2. 后台获取位置信息频率被降低
+
+3. 权限
+以前对于某个权限组的权限进行申请，会默认授予整个 权限组的所有权限，在8.0被纠正，只会授予具体的权限，但是对其他权限申请，会默认自动授予，而不会提示用户授予通过
+
+4. 类加载行为
+
+
+---------------------------------------
+
+
+Android 9.0 -- Android P   -- 28
