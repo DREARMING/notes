@@ -1,0 +1,83 @@
+
+Looper
+Looper有静态对象 sThreadLocal,存储着Looper对象，因此，一条线程对应于一个Looper（假如该线程曾经调用Looper.prepared() ）
+
+每个Looper有成员对象 MessageQueue， 这个就是消息轮询列队。
+
+Looper有两个便捷方法用于获取 当前线程的Looper对象。如Looper.getMainLooper()、Looper.myLooper()
+
+looper.loop()，调用该方法后，当前线程将会陷入死循环，因为loop方法中会一直轮询消息队列 - 调用mQueue.next()，没有消息或者消息处理时间还没到，即when > now, 将会堵塞，其实也不能说是堵塞，会把cpu时间片让给其他线程，借助native方法实现，避免空轮询，消耗cpu性能。
+
+仅当looper调用 quit方法后，MessageQueue.next()才会返回null退出循环，从而释放资源。
+
+-----------------
+
+Message类
+
+Message 有一个 next：Message 的成员变量，可以看出，它是一个单链表结构
+
+该类有一个静态成员 sPool 是一个Message 对象，通过next变量，存储调用 recycleUncheck方法的Message对象，对Message进行有效回收，防止不停创建对象。有限制，最大50个
+
+
+成员变量解析：
+
+target ： Handler  -- 指发送该Message的Handler对象
+
+obj ： Object  -- Message中存储的对象
+
+what： int  -- 常用于标识一个Message
+
+callback ： Runnable	回调，常见就是 mHandler.post(new Runnable()) ，callback为null，一般会diaoyong handler.handleMessage(Message) 方法处理Message
+
+data : bundle 
+
+
+------------
+
+
+MessageQueue
+
+持有一个Message对象 mMessages，借助Message的单链表特性，储存 Message队列的执行顺序。
+
+next()
+next方法，会判断 mMessages 的 执行时间when < now， 那么返回该Message 给 looper.loop 分发，否则 线程持有的cpu事件让给其他线程，
+直到 nextPollTimeoutMillis = when - now过后，才尝试获取 时间片继续处理。当然如果有新Message插入的话，会唤醒该线程，继续新 链表的头部Message的执行时间when是否到。
+
+quit()
+
+quit方法，将会表示 mQuitting = true， 在上述next方法 遇到该 标识，就会返回null, looper.loop()读取到 null值，代表消息队列已经停止。结束死循环
+
+
+removeMessage()  -- 这有一系列方法，请参照源码，这个方法名只是伪意思
+
+通过obj、what、handler 来寻找 MessageQueue 中符合条件的一系列Message，然后从消息队列中移除。
+
+obj的判断， 当obj == null，代表符合该handler 标识的所有 Message都将会移除
+
+
+-----------------
+
+Handler
+
+当MessageQueue 轮询出Message 后， 会调用 Message.target.dispatchMessage 方法，对Message进行分发。
+值得注意的是：我们MessageQueue 是在 looper所在线程取出 Message，然后直接分发出去的，那么不管原先 Message是在哪个线程被发送的，在这里取出的时候，已经完成了线程切换。
+
+分发的伪码如下：
+
+void dispatchMessage(Message msg){
+	if(msg.callback != null){
+		msg.callback.run();
+	}else{
+		if(mCallback != null){
+			mCallback.run(msg);
+			return;
+		}
+		handleMessage(msg);
+	}
+}
+
+
+handler取消发送的 Message，借助Message
+Queue的 removeMessageAndCallback等方法实现。
+
+
