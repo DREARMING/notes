@@ -280,6 +280,7 @@ layout_marginVertical <==> layout_marginTop and layout_marginBottom
 三、 服务变成后台后，一定时间后，将会被限制服务的访问，等于调用了stopSelf。 （草，这变更很严重）
 1. 可以考虑用 JobScheduler 替换, 执行期间具备cpu、网络获取
 2. 考虑用NotificationManager.startServiceInForeground(),启动前台服务，在应用栏显示一个通知，让服务正常运作。
+3. 后台应用无法调用startService了，不然会抛运行时错误。不要尝试在 workmanager中启动服务，应该直接在worker中执行逻辑
 
 2. 后台获取位置信息频率被降低
 
