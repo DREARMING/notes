@@ -1,0 +1,99 @@
+热修复
+
+热修复对类的修复有两种类型，一种是native底层修复、一种是类的全量dex修复
+
+native修复主要是通过 对 底层类的 method 进行替换，从而实现应用的热更新，而不需要重启app
+
+具体实现步骤是，
+首先获取通过 jni，获取java类的方法的底层指针，然后用新dex的方法实现 替换掉 旧dex的实现，不是通过成员变量一个个赋值的方法实现，
+因为 artMethod 的数据结构是公开，任何厂商都可以对其进行更改，所以，从一种数据结构类型的方法入手，artMethod 是线性排列的，即一个类的多个方法的指针在底层存储是紧密的，数组形式的，所以可以构造一个普通类如下：
+public class SimpleClass{
+	public final void method1(){
+
+	}
+
+	public final void method2(){
+
+	}
+}
+
+利用jni
+int size = env->fromRefectMethod(jmethod2) - env->fromeRefrectMethod(jmethod1); //从而得到method1的大小，即在具体运行时环境下，artMethod的具体值，
+然后就可以通过memcpy(oldmethod1, oldmethod2, size), 实现方法的热更新。
+
+
+java 多态的实现
+
+类底层实现 是通过 vtable 来保存类的方法， 包括从父类中继承下来的方法
+
+vtable的形成，是先把父类的 vatable 给复制过来，然后在子类的，如果方法签名相同，会覆盖掉前面vtable中的值，即父类的方法会被覆盖掉。如果没有相同，那么在vtable底部添加上新方法
+所以：
+Class A {
+	void method1(){}
+}
+
+class B extends A{
+
+	@override
+	void method1(){}
+	void method2(){}
+}
+
+A obj = new B();
+obj.method1();
+
+底层的实现是：
+因为 obj 的类型是A，所以从A类中获取到 method1的 vtable 的index = 0；
+然而，obj的具体实现是B，将会去寻找 B类的 vtable，并且把上面寻找的index 作为调用的方法，很明显，java是单继承的，vtable前面的总是父类的方法，但是有可能被
+b类的实现覆盖，所以获取的index总是对的。所以这种方式就实现了调用B类的method1()，
+
+
+全量的dex的类更新
+因为应用运行期间，已经加载大部分的类，这个时候是无法对类进行替换的，所以全量的dex更新方案只能通过冷启动实现。
+tinker 通过对基线包 和 发布包的dex 进行dex层面的指令和方法比较，得出一个差量dex，是tinker独家自研的算法，基于底层的dex数据结构，得到了较小的补丁包。然后再运行时，
+跟基线包的dex，进行合成，生成全量的dex，并把该dex至于 dexElements前面，classLoader就会优先加载 新生成的全量dex的class，从而覆盖掉基线包的dex，实现类的修复。
+
+因为Application 是程序的第一个入口，所以 Application中直接引用的类，将会一开始就被加载，这时候补丁还没生效，全量dex还没插进dexElements前面，就会导致Application直接引用的类仍会加载旧dex的，从而无法修复这些类。
+
+所以 tinker 直接代理了 Application 类， 用户不能够使用自己的application， 而是把Appliation中实现全部迁移到 ApplicationLike 中，这样Application类就非常干净，没有任何与修复类相关的代码，从而避免上述的情况，不过就是入侵性太强了
+
+
+
+
+关于 资源的热更新
+
+需要知道的是， apk 中的资源 都是通过 AssetManager进行加载的， 而市场上的 资源热更新都是参考 Instant Run 的实现，
+Instant Run 通过 构造一个新的 AssetManager， 然后将新的资源包路径添加到该AssetManager中，从而使 新的AssetManager具备加载新资源的能力。
+然后通过将代码中所有的AssetManager的引用换成新的AssetManager，从而实现资源的更新。
+
+其实原理是很简单的，但是本身资源包的替换却要把所有的AssetManager的引用进行替换，这里涉及了大量的操作。而阿里的sophix用了一种更加聪明的方式，
+直接在底层析构掉原来的AssetManager，然后重新调用AssetManager的init方法，并且把 一个新的资源包，但是packetid是0x66开头的，添加到进去，而java层的引用没有更改过，从而实现无感知的更新了资源。因为新的packetId跟原来的packetId不一样，所以新资源包的资源不会跟原资源包的资源造成冲突。
+
+但是因为换了资源包PacketId， 那么资源id的变更是如何处理的，下面有几种情况可以分析：
+
+首先是新增资源：
+
+基线包 			新包  						补丁
+0x79 001		0x79 001					0x66 001
+0x79 002		0x79 002  -- 新增资源
+				0x79 003
+
+这种情况，会引起基线包的资源id为002的造成下移，如果不处理这种情况的话，那么将会有大量的类代码需要修复，这肯定不行的
+所以阿里的修复方式是在基线包如此处理,在补丁中将新增的资源id改成0x66 001的资源，然后将那些因为新增的资源造成下移的，从新在代码中更改会原来的，在新包的代码中将0x79 003改回0x79002,从而在补丁类中，代码没有变更过，所以这样就解决了资源的增加问题。
+
+删除资源，删除的资源任由它放在基线包即可，因为没有代码引用到它了，所以对程序没有影响
+
+修改资源
+
+
+基线包 			新包  							补丁
+0x79 001		0x79 001  -- 修改的资源			0x66 001 -- 新增
+0x79 002		0x79 002  -- 新增的资源			0x66 002 -- 修改
+
+修改的资源也很容易，把补丁中涉及到修改的资源的类文件的 资源引用全部替换成补丁的 0x66 002，然后通过补丁把基线包的类替换掉，就解决资源的修改
+
+
+so 库修复
+
+
+
