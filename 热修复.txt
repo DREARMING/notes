@@ -97,3 +97,23 @@ so 库修复
 
 
 
+dexopt dexoart
+
+全量 dex 的意思
+
+不像 qq空间的方案，将 发生修改的类 单独打包成一个 patch dex, 然后利用 classLoader 加载类的流程，会将 DexPathList 对象的 Element数组，用新dex构建一个 Element，然后通过反射，将新dex插进数组前面，这样子，旧dex的bug类，就会无法被加载到，而会加载到新dex的类，这样就解决了类修复问题。
+但是qq空间这种方案，却有如下两种问题：
+1. dalvik 虚拟机的 dexopt 操作， 如果一个类的直接引用类都在同一个dex的话，就会把这个类打上 ISPREVIERTIFIED 标志， 举个例子： application 类
+里面只引用了一个ClassA，它和application类在同个的DEX，在应用安装过程中， application类会被打上标志， 当Application类中加载 ClassA 时就会进行校验，如果classA无法在本dex中找到，就会发生错误，这种打上标志的行为有利于避免运行时校验，如果运行时校验，则会耗费时间，对于应用启动的时候，会加载大量的类，如果里面的类都被打上标志的话，将会启动很快，反而言之，则会影响启动速度。
+
+现在发生这么一种情况， classA 是需要修复的， 现在被单独放在一个新dex中，这个时候application 去加载 classA就会发现 不在同一个dex中，从而发生错误。 而QQ空间通过javaassist 字节码操作，将所有的类的构造函数，插入一个新dex的类的引用，因而， 所有的类都不会打上这个标志，因而避免这个校验失败。但是也导致所有类的 vertify 操作，推迟到 Runtime，从而影响应用启动的过程。
+
+2. art虚拟机下， 因为 art 会将类的方法地址进行内联，从而导致，如果改动一个类的方法或者域，有可能引起其他直接引用该类的地址发生错乱，因此，也需要把相关的类打进补丁，这样子就会造成补丁包很大了，增加了 rom体积
+
+而 tinker采取全量dex更换，避免dalvik虚拟机的插桩行为。
+新dex 与 基线 dex 进行比较，通过自研算法dexdiff,得到差量dex，大大减少补丁的体积，下载后补丁后，通过拷贝出apk中dex，然后通过算法，将差量dex和新dex重新组合成修复了bug的新dex， 然后就是像 multidex 一样，加载新dex，替换掉原来的Element[], 这种操作就全量替代了旧dex，但是我们知道，application类是先于 tinker 实现替换操作的， 所以application类是无法进行修复的，tinker 把application类和tinker核心类打进main dex中，然后将application的所有代码迁移到 applicationLike的 新类中实现，这样子，application的代码就会非常干净了，其他类就可以进行修复了，这样子，就可以用全量dex替换掉旧的dex,而又不会影响程序启动 -- application 类非常干净，不过入侵性还是有点的，改变了原来的 编程方式。
+
+tinker的全量dex合成方案，并没有改变class在原来dex的位置，即没有发生 classA 、classB 在dex1 中，修复后的全量dex，仍然存在这样的关系，并不会把ClassB移除去这种情况，因为tinker关注的是类的变化，而不是位置。所以不存在qq空间的问题。
+
+multidex的原理
+
