@@ -1,0 +1,85 @@
+Multidex
+
+当项目越来越大的时候，项目最终会遇到 64k 问题 -- 项目的单个dex的方法数或者 Field数量 超过65535
+
+而这种问题只会出现在 Android 5.0 - 21 以下，即 19 或者19以下，这是因为 5.0 已经换成了 Art 虚拟机，而不是以前 4.4的 dalvik 虚拟机，art会在apk安装的时候，将所有的dex转变成 oat文件，而dalvik只会加载第一个dex，即 classes.dex，而不是加载classes.dex，所以通过gradle设置的multiDexEnable选项打出来的多dex安装并不适用于 dalvik虚拟机，因此google为了兼容，提供了 multidex方案，
+让dalvik 虚拟机也能避免 64k 问题。
+
+方案的实施源于对 ClassLoader 的加载机制进行hook：
+
+我们知道 Android 默认加载apk类的 ClassLoader 是PathClassLoader，而其继承于BaseDexClassLoader，BaseDexClassloader 通过 dexPathList.findClass 去加载 类，而 这个 dexPathList 是加载类和查找类的核心类。 
+它做的工作如下：
+
+先看下 DexPathList的 FindClass 方法，其中 dexElements 是一个 Element[] - 私有final
+ public Class findClass(String name, List<Throwable> suppressed) {
+       for (Element element : dexElements) {
+            DexFile dex = element.dexFile;
+
+           if (dex != null) {
+                Class clazz = dex.loadClassBinaryName(name, definingContext, suppressed);
+                if (clazz != null) {
+                    return clazz;
+                }
+            }
+       }
+       if (dexElementsSuppressedExceptions != null) {
+           suppressed.addAll(Arrays.asList(dexElementsSuppressedExceptions));
+        }
+        return null;
+    }
+
+每一个Element对象就对应着实际的 dex文件， 可以清楚看到，只要我们对 dexElemnts 数据进行扩充，手动加载除了 classes.dex 的其他 dex 文件，造出 对应的Element对象，
+构造一个新的 Elements数组，动过反射，hook掉原来的 dexElement 即可，而mutidex 库，所作的东西也仅此而已，无非加多几个Android版本库的的兼容。
+
+需要注意的地方如下：
+1. 因为 dex文件是在 apk 包里 在加载的时候，需要从apk包里面解压出来到本地 cache目录，而这个过程是耗时的，所以为了避免每一次都进行解压的过程，所以第一次回解压出来，方便下次调用
+所以 multidex 在 加载dex文件的时候，会先判断有没有cache，如果有cache文件，就直接加载 解压出来后的 dex文件，避免多次解压，影响app启动。
+
+2. 因为multidex library目的就是为了兼容 dalvik 虚拟机，而这个家伙永远只会加载 classes.dex ，所以程序每一次启动都需要执行 Multidex.install 方法，执行其 hook 逻辑
+
+3. 因为dalvik 初次 加载新 dex 文件，会执行dexopt 操作， 这个动作是非常耗时的，大概有个4秒钟。 又因为是在 application 的attachContext执行的，所以是在主线程，很容易发生 ANR问题。
+优化的策略：初次安装后，将Multidex.install 的执行，转移到 子进程， 子进程加载Activity通过子线程来 调用 Multidex.Install ，完成后通过SharePerference标识已经执行过 dexopt操作了，为了避免白屏操作，子进程的activity可以是闪屏页。 子进程的activity逻辑执行完毕后，就kill掉自身
+而主进程通过 while sleep进行堵塞，这个时候一般会有疑问，这样主进程的主线程不是阻塞了，确实，但是它现在是后台进程了，不会造成anr。当检查到 dexopt 标志ok了，就再次调用Multidex.install ，这个时候因为完成了 dexopt操作了， 所以是毫秒级，大约16毫秒就执行完毕。
+
+4. 可以想象到，如果自己在 application 中使用到的其他类，打包在其他dex，而代码执行又 发生在Multidex.install方法之前，或者作为 Application 成员变量，这无疑会发生错误。所以建议在 Application 的 attachBaseContext 执行 Multidex install 操作。 
+但是存在这样一个可能性， gradle插件在 打出多个 dex时，会不会优化，把Application类的引用类都打包进主 dex，避免上述的问题？
+又有可能因为自己对类加载的机制不太清楚，有可能在加载Application 类的时候，就已经去申请加载其他依赖类了，这个时候无论在哪里执行 install方法，都会存在 发生在 main dex找不到Class的问题。 这个时候，请看5， 提供解决方案
+
+5. gradle插件的配置
+android{
+	defaultConfig {
+        applicationId ""
+        multiDexEnabled true
+	}
+}
+
+afterEvaluate {
+    tasks.matching {
+        it.name.startsWith('dex')
+    }.each { dx ->
+        def listFile = project.rootDir.absolutePath + '/app/maindexlist.txt'
+        if (dx.additionalParameters == null) {
+            dx.additionalParameters = []
+        }
+        //表示当方法数越界时则生成多个dex文件（我的没有越界，貌似也生成了两个）
+        dx.additionalParameters += '--multi-dex'
+        //这个指定了listFile中的类（即maindexlist.txt中的类）会打包到主dex中，不过注意下一条。
+       	//可以在\app\build\intermediates\multi-dex\debug目录下找到了一个maindexlist.txt，
+       	//可以尝试用脚本读取这个文件，然后提供配置项增加额外的类，就可以自动化操作了
+        
+        dx.additionalParameters += '--main-dex-list=' + listFile
+        // 表明只有-main-dex-list所指定的类（在我的配置中，就是app目录下的maindexlist.txt中包含的类）才能打包到主dex中，如果没有这个选项，上个选项就会失效
+        dx.additionalParameters += '--minimal-main-dex'
+    }
+}
+
+dependencies {
+	implementation 'com.android.support:multidex:1.0.3'
+}
+
+6. 这个方案其实是算完美的，但是因为历史遗留问题，仍然有可能发生问题
+
+这是由于dexopt的LinearAlloc限制引起的，在Android版本不同分别经历了4M/5M/8M/16M限制，4.2.x系统上可能都已到16M， 在Gingerbread或者以下系统LinearAllocHdr分配空间只有5M大小的， 高于Gingerbread的系统提升到了8M。Dalvik linearAlloc是一个固定大小的缓冲区。在应用的安装过程中，系统会运行一个名为dexopt的程序为该应用在当前机型中运行做准备。dexopt使用LinearAlloc来存储应用的方法信息。Android 2.2和2.3的缓冲区只有5MB，Android 4.x提高到了8MB或16MB。当方法数量过多导致超出缓冲区大小时，会造成dexopt崩溃。
+
+
+参考链接：https://www.jianshu.com/p/e164ee033928
