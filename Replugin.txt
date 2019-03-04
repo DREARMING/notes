@@ -3,6 +3,8 @@ Replugin
 一. 宿主模块 - host 的框架初始化
 
 
+注意 initClient，绑定进程信息，生成 ProcessClientRecord
+
 Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，因为该类加载的时候，还没有注入，并且注入的 ClassLoader 只负责加载某些类而已
 
 
@@ -20,7 +22,7 @@ Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，
 	2. 判断插件是否已经初始化，初始化后，直接根据 load 级别来返回。一般插件从来没有加载过的话，初始加载都是直接加载app级别的，即整个apk的信息都加载了。即这里一般跳过
 	3. 如果使用缓存的话，直接用 Plugin 的静态变量缓存中读取，如果曾有过加载的话，就可能会命中，命中就返回true
 	4. 对 Plugin 加锁，其实就是加多了一个文件而已。 后续步骤加载完之后就解锁
-	5. 调用 doLoad 方法， 新建了一个 Loader 对象（核心类），然后调用其 loadDex方法去加载apk。 
+	5. 调用 Plugin对象的 doLoad 方法， 新建了一个 Loader 对象（核心类），其作为Plugin的一个成员变量，然后调用其 loadDex方法去加载apk。 
 	Loader类 持有一个插件的大部分信息、包括：mPackageInfo (包含插件包名、进程名、四大组件的信息、四大组件的Intent-fliter信息)、mComponents:ComponentList（封装好插件apk的四大组件的基本信息）、mPkgResources:Resource(插件apk的资源加载类)、
 	mCladdLoader:DexClassLoader (插件的classloader)、mPkgContext：Context（其实是一个PluginContext，该类的构造函数会保存mPkgResource、mClassLoader、loader对象）
 
@@ -38,7 +40,63 @@ Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，
 	1. 调用 PluginApplicationClient 的 getOrCreate 方法，然后判断有没有缓存，没有就在里面创建了 PluginApplicationClient 对象，缓存并返回出去
 	2. 在创建 PluginApplicationClient 时候，通过反射，持有了Application 类 的 构造器、attach两个方法，然后调用 newInstance 就创建了Applcation对象
 	3. 通过调用 PluginApplicationClient 的 callAttachBaseContext 、callOnCreate 方法，就可以调用 application 的对应方法了。 
-总结：插件的 Application 的启动很简单，单纯就反射对象的方法，并传值，并没有涉及到与系统的生命周期变化
+总结：插件的 Application 的启动很简单，单纯就反射对象的方法，并传值，并没有涉及到与系统的生命周期变化. 插件的上下文是PluginContext， 里面重载了很多 ContextWrapper 的 方法。
 
 
 六、 startActivity
+主要是讲这两种情况： 宿主启动插件Activity 、或者插件启动插件Activity，因为宿主启动宿主activity，插件启动宿主activity，这里直接走系统流程即可。因为宿主的activity不需要坑位，因为已经在 manifest 中声明
+
+上述分析的两种，其 Intent 的构造都是 Intent.setComponentName("plugin","xxxactivity"); componentName的包名换成了插件名。
+上述两种情况都是借助了 Replugin.startActivity来启动的， 插件因为在加载的时候，就初始化了Entry，如第五点所论述的，它持有Replugin这个类的静态方法，这样子就可以借助Replugin来启动Activity的了。
+
+最后会调用 PluginLibraryInternalProxy.startActivity(Context,Intent intent,String plugin,String activty,int process, boolean download)
+
+1. 首先判断 download 是否为 true，即插件是否需要加载， 默认为true， 里面会调用 PluginTable.get(plugin) ，如果不为null， 证明插件已经在加载了，如果为空，就需要判断是否要进行加载。 如果里面插件没有加载，最后会走上述第五点的流程，完成插件的加载和 application 初始化、插件框架初始化。
+
+2. 判断 目标activity 是否是 hookingClass， 因为 hookingClass 已经 注册了，可以在 hook掉的ClassLoader 直接找到目标插件和 DexClassLoader进行加载。
+
+3.  判断插件是否禁用，如果是仅用了，就不需要启动该插件的activity了
+4. 判断插件是否已经释放，因为插件如果很大，释放会比较耗时，可以在这里回调 RePlugin.getConfig().getCallbacks().onLoadLargePluginForActivity，来提示用户插件在加载。
+
+5. 调用 PluginCommImpl.loadPluginActivity 去寻找坑位Activity的 ComponentName
+	1. 先根据 Intent，插件activity的名字 和 插件名，调用 getActivityInfo 方法，找到目标Activity
+		1. 这里先通过 Pmbase.loadAppPlugin，加载到Plugin对象，然后去该 Plugin 的Loader中，Loader的componentList中查找 activityInfo
+		2. 如果找不到，再通过Intent的IntentFilter去查找。 最后如果查找不到，返回null
+	2. 找到activityInfo后，设置 Intent 的主题为activityInfo的主题，根据activityInfo的 processName，获取进程 process：int 值
+	3. 调用 MP.startPluginProcess(plugin, process, info)，开启目标进程
+		1. 该方法最后会到 插件管理进程中 调用 PmBase.startPluginProcessLocked,如果process 不是合法的，就会默认设置为 UI进程。
+		2. 接着在方法内部调用 PluginProcessMain.probePluginClient(plugin, process, info)：IPluginClient  检查当前 process 指定进程是否启动，进程是否启动，其实再 第一点框架的初始化 已经做出解析，进程启动后会生成一个 ProcessClientrecord, attach进程信息到 ProcessPluginMain 的 ALL 中，ProcessClentRecord是 all的 键值类型，该类型的 client：IPluginClient 是一个跨进程Stub， 真实实现类是 PluginProcessPer
+		3. 如果上述方法返回了 PluginProcessPer对象，就return，否则调用返回了 null， 那么代表 目标进程 没有启动，然后调用 StubProcessManager 分配进程坑位
+		4. 校验 坑位的合法性，通过后，调用 PluginProviderStub.proxyStartPluginProcess(mContext, index) 启动目标进程。
+			1. 通过ContentProvider，和gradle插件 在manifest中动态注册的 ContentProvider（不同进程），来启动这些ContentProvider来开启坑位进程。因为在manifest中注册的ContentProvider，其process是有规律的，可以用 authority + 上述坑位的process 组合成authority，从而巧妙的开启坑位进程。
+		5. 再次调用 PluginProcessMain.probePluginClient(plugin, process, info)，检测目标进程是否启动
+		6. 返回PluginProcessPer：IPluginClient 对象
+	4. 调用 String container = client.allocActivityContainer(plugin, process, ai.name, intent) 跨进程分配 activity 坑位， client 就是IPluginClient
+		1. 根据Plugin的loader 获取到activityInfo
+		2. 借助 PluginContainer 的 alloc(ActivityInfo ai, String plugin, String activity, int process, Intent intent) 方法
+			1. 构建了一个 ActivityState 的空对象
+			2. 判断 activityInfo 的laucherMode 和 taskAffinity 来调用不同的 allocLocked 重载方法，我们这里最堪 singleTask、singleTop这个方法。
+			3. 这里调用 ActivityState 的 isTarget 方法判断 plugin 和 activity 是否匹配，匹配就返回这个 ActivityState 对象。
+			4. 返回 ActivityState.container：String， 这个就是activity占位坑 activity的类名，就是 gradle 动态注册的占坑activity，它不具备实现类，只是在manifest中声明而已，因为 hook掉的 RepluginClassLoader 不会加载它的
+	5. 从4中获取到 container 后，就返回 要启动坑位的 ComponentName(PackageName, container)
+
+6. 从 5 中获取到的 ComponentName, 参数 Intent 设置这个 ComponentName， 然后调用 context.startActivity(intent) 即可，这里就会走系统的调用流程
+
+7. 从activity的启动流程来看，必然会在 scheduleLaunchActivity 的流程中， 调用应用的 classLoader 对 坑位 activity 进行加载， 而应用的classLoader 已经变成了 hook 掉的 RepluginClassLoader，可以查看其 loadClass 方法， 会将 加载 类的过程 首先代理给 Pmbase.loadClass（Sting className, boolean resolove）
+	1. 其中一个语句会判断 mContainerActivities.contains(className)， 即 className 是否是 坑位 activity，哈哈，这里捉到了，
+	然后调用 PluginProcessPer.resolveActivityClass(container) 方法, (container == className)
+		1. 调用 PluginContainer.lookupByContainer(container), 返回 ActivityState， 这里从流程 5.4 就可以看到，这是在分配坑位的时候，保存了 plugin 和 activity到 ActivityState 中，这里又将这些信息拿出来。
+		2. 调用 Pmbase.loadAppPlugin 获取到 plugin 对象，然后用 其ClassLoader 加载activity 类（classLoader 是 PluginDexClassloader），然后返回 目标activity 类，而不是坑位activity类。
+最后返回目标activity类，从而实现 坑位 和 目标插件 activity 的偷梁换柱，欺骗过系统。 为什么可以欺骗系统，看 第七的分析
+
+
+
+
+七、 为什么hook掉 ClassLoader 替换掉 坑位Activity，就可以启动Activity呢
+
+可以从 Activity 启动过程分析知道， 当我们启动一个 Activity 后， AMS会校验 我们传递的 Intent，检测它对应的 Activity 是否在 Manifest 存在，当然也可能是校验 Intent-filter 有没有找到对应的 activity， 如果找到了，就调用该Activity 所在应用的 ApplicationThread 进行activity的创建， 即 scheduleLaunchActivity。
+这就是为什么需要用坑位activity的原因，因为需要避过 系统的校验。
+AMS校验通过后，就会跨进程呼叫 需要启动的 activity 的进程，进行创建 ActivityClientRecord， 并且传入 PackageInfo 和 ClassLoader，
+在ActivityClientRecord里面，将会创建一个 token，这是一个binder 对象，是AMS唯一标识一个activity的， 然后 利用ClassLoader、 Intent传回来的activity 类名，进行类加载，实例化，并且将 token attach到新创建的activity。
+
+上面这个过程，因为hook掉了ClassLoader，所以我们将 坑位activity对应的插件activity实例化，然后绑定 token， 这样就完成了欺骗系统的目的，因为AMS只认 token 这个标识符， 我们的插件activity也拥有这个token binder，所以能够正确接收生命周期调用
