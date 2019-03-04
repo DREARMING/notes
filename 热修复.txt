@@ -21,6 +21,7 @@ public class SimpleClass{
 int size = env->fromRefectMethod(jmethod2) - env->fromeRefrectMethod(jmethod1); //从而得到method1的大小，即在具体运行时环境下，artMethod的具体值，
 然后就可以通过memcpy(oldmethod1, oldmethod2, size), 实现方法的热更新。
 
+但是native方法虽然可以不用通过冷启动，就可以实现更新，但是缺点也是明显的，如果方法发生增加，删除，在art虚拟机中，很多方法的地址在是被内嵌入到方法中的，如果增加了修方法A，那么原本dex中数据结构中的 方法b 引用方法C，而新dex中虽然没更改这种引用关系，但是c的地址可能已经发生变更了，这种情况无法通过native修复来解决。
 
 java 多态的实现
 

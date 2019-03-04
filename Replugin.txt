@@ -1,0 +1,44 @@
+Replugin
+
+一. 宿主模块 - host 的框架初始化
+
+
+Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，因为该类加载的时候，还没有注入，并且注入的 ClassLoader 只负责加载某些类而已
+
+
+二、常驻进程的初始化
+
+三、
+
+四、 插件的安装、更新
+
+五、 插件的加载
+
+1. 调用了 Plugin.load(int load, boolean cache):boolean 进行插件的加载， Plugin在第四点的时候就通过 PluginInfo 构造了。
+参数说明， load：有4个级别，分别是加载 PackageInfo、resource、classLoader、App(Context)
+	1. 先判断插件是否禁用，禁用了直接加载失败
+	2. 判断插件是否已经初始化，初始化后，直接根据 load 级别来返回。一般插件从来没有加载过的话，初始加载都是直接加载app级别的，即整个apk的信息都加载了。即这里一般跳过
+	3. 如果使用缓存的话，直接用 Plugin 的静态变量缓存中读取，如果曾有过加载的话，就可能会命中，命中就返回true
+	4. 对 Plugin 加锁，其实就是加多了一个文件而已。 后续步骤加载完之后就解锁
+	5. 调用 doLoad 方法， 新建了一个 Loader 对象（核心类），然后调用其 loadDex方法去加载apk。 
+	Loader类 持有一个插件的大部分信息、包括：mPackageInfo (包含插件包名、进程名、四大组件的信息、四大组件的Intent-fliter信息)、mComponents:ComponentList（封装好插件apk的四大组件的基本信息）、mPkgResources:Resource(插件apk的资源加载类)、
+	mCladdLoader:DexClassLoader (插件的classloader)、mPkgContext：Context（其实是一个PluginContext，该类的构造函数会保存mPkgResource、mClassLoader、loader对象）
+
+	6. loadDex方法的方法逻辑如下：
+		1. 如果 mPackageInfo == null, 缓存为空，就通过 PackageManager的getPackageArchiveInfo 方法去加载 PackageInfo 信息，存进loader对象中，并且存进Plugin的静态缓存中
+		2. 如果 mComponents == null, 缓存为空， 就通过 mPackageInfo 中的包信息，初始化四大组件的基本信息，不是加载，只是一些基本信息的记录、最后缓存进Plugin的静态缓存中
+		3. 如果 mPkgResources == null，缓存为空， 就通过 PackageManager的 getResourcesForApplication 加载出 Resource 对象，只要能获取到 PackageInfo，安装包存在，该方法不会抛异常，最后缓存进 Plugin 静态缓存中
+		4. 如果 mClassLoader == null，缓存为空， 就通过 Replugin.getConfig().getCallbacks().createPluginClassLoader 构造一个 DexClassLoader， 其中参数Parent是尚未注入 的 ClassLoader， 即普通的 PathListClassLoader。
+		5. 构建 mPkgContext。
+
+	7. 调用 PluginManager 更新插件信息
+	8. 如果 load 是 loadApp 级别， 调用loader对象的loadEntryMethod2 方法，借用新构建的DexClassLoader反射 Entry类， 然后将调用Entry.create方法 mPkgContext、PathListClassLoader、PluginCommImpl 传进入，因为现在已经在插件的ClassLoader加载的class，然后进行初始化操作， 该初始化操作主要是为了初始化插件的环境变量
+
+2. 调用 callApp 方法
+	1. 调用 PluginApplicationClient 的 getOrCreate 方法，然后判断有没有缓存，没有就在里面创建了 PluginApplicationClient 对象，缓存并返回出去
+	2. 在创建 PluginApplicationClient 时候，通过反射，持有了Application 类 的 构造器、attach两个方法，然后调用 newInstance 就创建了Applcation对象
+	3. 通过调用 PluginApplicationClient 的 callAttachBaseContext 、callOnCreate 方法，就可以调用 application 的对应方法了。 
+总结：插件的 Application 的启动很简单，单纯就反射对象的方法，并传值，并没有涉及到与系统的生命周期变化
+
+
+六、 startActivity
