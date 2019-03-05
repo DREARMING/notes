@@ -1,18 +1,80 @@
 Replugin
 
 一. 宿主模块 - host 的框架初始化
+应用的 Application 在 attachBaseContext时，就会进入 Replugin 框架 的初始化过程，记住：不仅是宿主进程、如果存在常驻进程、插件进程，都会走这个初始化过程。
+然后在 RepluginApplication 的attachBaseContext 方法中创建 一个 RepluginConfig 对象，然后调用 Replugin.attachBaseContext 方法，该方法就是整个Replugin框架初始化的入口
+1. 首先调用 RePluginInternal.init(app) keep住 Application 的引用，暂时不清楚该类的作用
+2. 调用 IPC.init(appContext) 方法，IPC类就只是一个工具类，记录当前进程一些基本信息：进程id、是否是常驻进程或者UI进程，包名
+3. 调用 HostConfigHelper.init() 方法， 这个方法比较重要，这是在 HostConfigHelper类的静态块里面， 读取 由 gradle 生成的配置类的各个字段：RepluginHostConfig，
+该配置类配置了 坑位的数量、常驻进程的名字、是否由常驻进程管理插件类、TaskAffinity 组数、是否使用 AppCompat 库 这些信息，对应了gradle host 插件的 repluginHostConfig 配置块
+3. PluginStatusController.setAppContext(app) , 这是一个插件状态管理器，主要通过 preference 来保存异常插件的信息：比如禁用的插件
 
+4. 调用 PMF.init(app) 方法，-- PMF 主要是一个代理类，方法都是由 Pmbase 实现的
+	1. 初始化 PluginManager，调用evalPluginProcess 分析当前进程分析出是否是 常驻进程、UI进程、插件进程，可以提供方法用来判断进程的有效性
+	2. 构建 整个框架 的核心类 Pmbase， 在构造函数中，创建了 mClient:PluginProcessPer、mLocal:PluginCommImpl、mInternal:PluginLibraryInternalProxy 三个对象
+	PluginProcessPer 是一个 binder 实现类，其原型是 IPluginClient.Stub, 它的作用就是借助 其成员变量 mACM来分配坑位，还可以解析出具体的坑位的 activity，借助Plugin的loader 就可以找到该 activity，并且借助Plugin的classloader加载。
+		1. 它具备一个 mACM:PluginContainers 的成员变量，并在构造函数中进行初始化。该类主要是处理坑位的，它持有整个程序的坑位，然后负责回收、分配、查询等工作，
+		坑位的状态 是通过 ActivityState 类保存，该类持有：plugin、container（坑位全名）、state（坑位占用情况）、activity（占用坑位的目标activity）。 PluginContainer 有一个mStates的成员变量，它是一个map，key是坑位的具体名称，value是ActivityState，可以从这里轻松查询到 坑位的占据情况
+		gradle分配的坑位策略是：
+		1. 每种进程分配相同多的坑位 - 最多3个进程
+		2. 根据 launcherMode 分配坑位，这里可以通过gradle脚本制定每种launcherMode 分配多少个坑位
+		3. 主题是否透明来进行分配 - 2种
+		4. taskAffinity 来分配 - 2组
+		可以计算一下分配的坑位有上百个 ：  3 * 2 * 2 * (各种launcher模式的坑位数量之和)
+		备注：坑位是指 由gradle在编译期间动态向manifest注册的一些 activity，本身没有实现类，只是起到声明的作用，目的瞒过系统对activity的校验
 
-注意 initClient，绑定进程信息，生成 ProcessClientRecord
+	插件的类因为是 PluginDexClassLoader 加载的，因为无法索引到 宿主中的框架的实用类，就如Replugin 这个类，插件的实现都是通过反射该类，获取到该类的 method。这些操作是在插件加载成功后，反射调用 Entry 类，把 PathCLassloader 传进来，从而在插件类反射，持有大量框架的实用方法，当需要的时候进行调用。
+	如上所属，PluginCommImpl 、 PluginLibraryInternalProxy，插件反射持有这些类的静态方法，进行调用。 而且这是一种巧妙地方法，避免应用中存在两种 classloader加载的不同类，确保插件框架的所有具体实现类都是由 PathListClassLoader 加载的，因为 PluginDexClassLoader 并不具备加载这些类的能力
+
+	3. 调用 Pmbase.init() 方法
+	1. 这里会先判断当前进程是否是插件管理进程，这里假设应用配置了常驻进程，那么当程序初始化时，当前进程是UI进程，则调用 initForClient 方法，如果是常驻进程，则会调用 initForServer 方法
+		1. 分析分支1：UI进程会调用 initForClient，  --UI进程
+			1. 首先调用 PluginProcessMain.connectToHostSvc()
+				1. 然后内部 调用 IBinder binder = PluginProviderStub.proxyFetchHostBinder(context); 这个调用很有意思，启动了 ProcessPitProviderPersist 这个provider，有意思的是，这个provider在manifest中声明进程是 常驻进程，也就是说这个调用，因为常驻进程还没建立，会涉及到进程的启动，也就是重新开始了 Replugin 框架的初始化，就会走进 分支2， 待分支2走完，常驻进程就完成了初始化，其 PmHostSvc 已经创建成功，就可以返回 binder 对象
+				2. 获取到 binder 后，跟常驻进程进行连接监听， 如果监测到 常驻进程 服务断开，主动退出与 PluginManager 的binder连接，如果当前进程如果是插件进程，就杀死自己。因为插件进程服务挂掉了，无法为插件提供服务，这个时候插件进程的操作是不稳定的。
+				3. PluginProcessMain 的 sPluginHostRemote 被赋值为 PmHostSvc 的远程代理
+				4. 从 PmHostSvc 跨进程 获取到 IPluginManager 这个binder 对象，然后调用 syncRunningPlugins 方法，跨进程同步 运行的插件信息
+				5. 注册该进程信息到“插件管理进程”中，由插件管理进程管理进程相关信息，调用Pmbase.attach(); 这里又跨进程调用 PmHostSvc.attachPluginProcess() ,
+				这里将 当前进程的 IPluginClient （即PluginProcessPer）传给了插件管理进程，插件管理进程 为这个进程 创建 ProcessClientRecord，并存进PluginProcessMain的Map<String, ProcessClientRecord> ALL成员中， 并且用 IPluginClient 这个binder 远程监听 该进程记录的存活，如果断开，就从All中移除。这里可以很方便知道当前应用运行了哪些进程
+				6. return
+			2. 调用 refreshPluginsFromHostSvc，从远程进程中加载 所有插件信息 List<PluginInfo>，并用 mPlugins 保存起来
+
+		2. 分析分支2：常驻进程会调用 initForServer  -- 常驻进程
+			1. 新建了 mHostSvc:PmHostSvc 对象， 这个对象的类是 IPluginHost.Stub 的实现类，在构造函数中，又新建了 PluginManagerServer、PluginServiceServer两个对象
+				1. PluginManagerServer 这个类是插件管理类，用来控制插件的安装、卸载、获取等。运行在常驻进程中。 它有个成员变量 mStub, 是一个 IPluginManagerServer.Stub 的实现。 
+			2. 调用 PluginProcessMain.installHost(mHostSvc), 这个PluginProcessMain 持有一个 sPluginHost 变量，就是 mHostSvc，如果是UI进程的话，这个值为null， 里面在调用 PluginManagerProxy.connectToServer(sPluginHostLocal); 然后在里面，将 mHostSvc 的 PluginManagerServer 对象赋值给其 mRemote成员，这个时候，PluginManagerProxy 就持有了 PluginManagerServer 的binder 对象了。
+			3. 调用 Builder.build()方法，开始扫描 程序的所有插件
+				1. 根据 assets 目录下的 plugins-builtin.json 扫描内置插件，因为里面就是插件 json 数组，可以很方便解析出 PluginInfo
+				2. 扫描 v5 插件，并不知道是什么东西
+			4. 调用 refreshPluginMap(List<PluginInfo> plugins) , 将插件信息更新到 PmBase 的 mPlugins 中
+			5. 再调用 PluginManagerProxy.load() 去让 PluginManager 加载插件信息。 这是一种新方案，也是未来的方案，所有插件的安装卸载更新都会交给 PluginManager去处理，这里通过一个 PlulginList 来保存插件信息，并且发生变化后，就调用save方法，将PluginInfo对象数组转成Json字符串，存进 app_p_a/p.l 文件中，方便后续恢复
+				1. 打开 files 目录下的 app_p_a/p.l 文件，然后读取Json 字符串，然后把其转成 PluginInfo 数组
+				2. 调用 updateAllIfNeeded 方法，检查更新，更新的逻辑如下：
+					1. 插件正在运行，不需要处理
+					2. 如果插件被标注为 unInstall ,那么需要将其dex、lib、jar删除、并且通知其他进程，插件信息需要删除，并且更新将其移除出PluginList
+					3. 如果插件需要更新，因为前面已经判断了插件是否运行，如果能跑到这里，可以直接更新，覆盖掉原来的插件或者直接删除
+				3. 如果 上面存在被更新的插件，那么需要保存一下 PluginList 到 p.l 文件
+				4. 返回 List<PluginInfo>
+			6. 继续调用 refreshPluginMap 方法，更新插件信息，这个时候， Pmbase 的Plugin信息就和 PluginManager 的信息保持同步了。
+
+		3. 分支走完，就会 用mPlugins更新 PluginTable ，可以方便查询插件信息的 map对象
+
+	4. 调用 PatchClassLoaderUtils.patch(application) hook 掉 应用的 PathListClassLoader
+		1. 调用 application.getBaseContext() 获取到 Context 对象，然后通过反射，获取到 Context 的 mPackgeInfo, 然后继续反射 mPackageInfo 的 mClassLoader 对象，
+		从 Application 创建流程就知道，这个 mClassLoader 就是全局的 PathListClassLoader, 应用就是利用它来加载 应用中的类，关于这点，可以从第七点印证
+		2. 然后调用  RePlugin.getConfig().getCallbacks().createClassLoader(oClassLoader.getParent(), oClassLoader); 方法，获取到我们 具备hook 处理的 RePluginClassLoader
+		3. 反射写进 mClassLoader 中，就完成了 hook 操作, 关于具体 hook 的细节，请查看 第六点 startActivity 的 第8小节。
+		4. 并且设置 Thread.setContextClassLoader(repluginClassLoader),  防止在个别Java库用到了Thread.currentThread().getContextClassLoader()时，“用了原来的PathClassLoader”，或为空指针
+
+5. 调用 PMF.callAttach() 方法
+	1. 便利 Pmbase 里面的插件列表，给所有插件调用attach（mContext, mClassLoader, PluginCommImpl）
+	2. 如果当前插件是插件进程，就加载当前插件，调用 Plugin.load 方法，走 第五点 插件加载的方案
 
 Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，因为该类加载的时候，还没有注入，并且注入的 ClassLoader 只负责加载某些类而已
 
 
-二、常驻进程的初始化
-
-三、
-
 四、 插件的安装、更新
+
 
 五、 插件的加载
 
@@ -55,7 +117,7 @@ Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，
 
 2. 判断 目标activity 是否是 hookingClass， 因为 hookingClass 已经 注册了，可以在 hook掉的ClassLoader 直接找到目标插件和 DexClassLoader进行加载。
 
-3.  判断插件是否禁用，如果是仅用了，就不需要启动该插件的activity了
+3.  判断插件是否禁用，如果是禁用了，就不需要启动该插件的activity了
 4. 判断插件是否已经释放，因为插件如果很大，释放会比较耗时，可以在这里回调 RePlugin.getConfig().getCallbacks().onLoadLargePluginForActivity，来提示用户插件在加载。
 
 5. 调用 PluginCommImpl.loadPluginActivity 去寻找坑位Activity的 ComponentName
@@ -65,18 +127,18 @@ Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，
 	2. 找到activityInfo后，设置 Intent 的主题为activityInfo的主题，根据activityInfo的 processName，获取进程 process：int 值
 	3. 调用 MP.startPluginProcess(plugin, process, info)，开启目标进程
 		1. 该方法最后会到 插件管理进程中 调用 PmBase.startPluginProcessLocked,如果process 不是合法的，就会默认设置为 UI进程。
-		2. 接着在方法内部调用 PluginProcessMain.probePluginClient(plugin, process, info)：IPluginClient  检查当前 process 指定进程是否启动，进程是否启动，其实再 第一点框架的初始化 已经做出解析，进程启动后会生成一个 ProcessClientrecord, attach进程信息到 ProcessPluginMain 的 ALL 中，ProcessClentRecord是 all的 键值类型，该类型的 client：IPluginClient 是一个跨进程Stub， 真实实现类是 PluginProcessPer
-		3. 如果上述方法返回了 PluginProcessPer对象，就return，否则调用返回了 null， 那么代表 目标进程 没有启动，然后调用 StubProcessManager 分配进程坑位
+		2. 接着在方法内部调用 PluginProcessMain.probePluginClient(plugin, process, info)：IPluginClient  检查当前 process 指定进程是否启动，进程是否启动，其实在 第一点框架的初始化 已经做出解析，进程启动后会生成一个 ProcessClientrecord, attach进程信息到 ProcessPluginMain 的 ALL 中，ProcessClentRecord是 all的 键值类型，该类型的 client：IPluginClient 是一个跨进程Stub， 真实实现类是 PluginProcessPer
+		3. 如果上述方法返回了 PluginProcessPer对象，就return，否则调用返回了 null， 这代表 目标进程 没有启动，然后调用 StubProcessManager 分配进程坑位
 		4. 校验 坑位的合法性，通过后，调用 PluginProviderStub.proxyStartPluginProcess(mContext, index) 启动目标进程。
-			1. 通过ContentProvider，和gradle插件 在manifest中动态注册的 ContentProvider（不同进程），来启动这些ContentProvider来开启坑位进程。因为在manifest中注册的ContentProvider，其process是有规律的，可以用 authority + 上述坑位的process 组合成authority，从而巧妙的开启坑位进程。
+			1. 通过ContentProvider，和gradle插件 在manifest中动态注册的 ContentProvider（在manifest声明不同进程），来启动这些ContentProvider来开启坑位进程。因为在manifest中注册的ContentProvider，其process是有规律的，可以用 authority + 上述坑位的process 组合成authority，从而巧妙的开启坑位进程。
 		5. 再次调用 PluginProcessMain.probePluginClient(plugin, process, info)，检测目标进程是否启动
 		6. 返回PluginProcessPer：IPluginClient 对象
 	4. 调用 String container = client.allocActivityContainer(plugin, process, ai.name, intent) 跨进程分配 activity 坑位， client 就是IPluginClient
 		1. 根据Plugin的loader 获取到activityInfo
 		2. 借助 PluginContainer 的 alloc(ActivityInfo ai, String plugin, String activity, int process, Intent intent) 方法
 			1. 构建了一个 ActivityState 的空对象
-			2. 判断 activityInfo 的laucherMode 和 taskAffinity 来调用不同的 allocLocked 重载方法，我们这里最堪 singleTask、singleTop这个方法。
-			3. 这里调用 ActivityState 的 isTarget 方法判断 plugin 和 activity 是否匹配，匹配就返回这个 ActivityState 对象。
+			2. 判断 activityInfo 的laucherMode 和 taskAffinity 来调用不同的 allocLocked 重载方法，我们下面就只分析 singleTask、singleTop这个方法。
+			3. 这里首先调用 ActivityState 的 isTarget 方法判断 plugin 和 activity 是否匹配，匹配就返回这个 ActivityState 对象，这是缓存调用，可以应付 singleTop这些重复占坑的问题。 如果没有的话，就分配一个state状态为none的坑位，返回ActivityState对象，并且将activity、plugin这些信息注入到 该 ActivityState 中。
 			4. 返回 ActivityState.container：String， 这个就是activity占位坑 activity的类名，就是 gradle 动态注册的占坑activity，它不具备实现类，只是在manifest中声明而已，因为 hook掉的 RepluginClassLoader 不会加载它的
 	5. 从4中获取到 container 后，就返回 要启动坑位的 ComponentName(PackageName, container)
 
@@ -85,7 +147,7 @@ Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，
 7. 从activity的启动流程来看，必然会在 scheduleLaunchActivity 的流程中， 调用应用的 classLoader 对 坑位 activity 进行加载， 而应用的classLoader 已经变成了 hook 掉的 RepluginClassLoader，可以查看其 loadClass 方法， 会将 加载 类的过程 首先代理给 Pmbase.loadClass（Sting className, boolean resolove）
 	1. 其中一个语句会判断 mContainerActivities.contains(className)， 即 className 是否是 坑位 activity，哈哈，这里捉到了，
 	然后调用 PluginProcessPer.resolveActivityClass(container) 方法, (container == className)
-		1. 调用 PluginContainer.lookupByContainer(container), 返回 ActivityState， 这里从流程 5.4 就可以看到，这是在分配坑位的时候，保存了 plugin 和 activity到 ActivityState 中，这里又将这些信息拿出来。
+		1. 调用 PluginContainer.lookupByContainer(container), 返回 ActivityState， 这里从流程 5.3 就可以看到，这是在分配坑位的时候，保存了 plugin 和 activity到 ActivityState 中，这里又将这些信息拿出来。
 		2. 调用 Pmbase.loadAppPlugin 获取到 plugin 对象，然后用 其ClassLoader 加载activity 类（classLoader 是 PluginDexClassloader），然后返回 目标activity 类，而不是坑位activity类。
 最后返回目标activity类，从而实现 坑位 和 目标插件 activity 的偷梁换柱，欺骗过系统。 为什么可以欺骗系统，看 第七的分析
 
