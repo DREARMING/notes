@@ -10,9 +10,9 @@ Replugin
 3. PluginStatusController.setAppContext(app) , 这是一个插件状态管理器，主要通过 preference 来保存异常插件的信息：比如禁用的插件
 
 4. 调用 PMF.init(app) 方法，-- PMF 主要是一个代理类，方法都是由 Pmbase 实现的
-	1. 初始化 PluginManager，调用evalPluginProcess 分析当前进程分析出是否是 常驻进程、UI进程、插件进程，可以提供方法用来判断进程的有效性
+	1. 初始化 PluginManager，调用evalPluginProcess 分析当前进程分析出是否是 常驻进程、UI进程、插件进程、进程Index，可以提供方法用来判断进程的有效性
 	2. 构建 整个框架 的核心类 Pmbase， 在构造函数中，创建了 mClient:PluginProcessPer、mLocal:PluginCommImpl、mInternal:PluginLibraryInternalProxy 三个对象
-	PluginProcessPer 是一个 binder 实现类，其原型是 IPluginClient.Stub, 它的作用就是借助 其成员变量 mACM来分配坑位，还可以解析出具体的坑位的 activity，借助Plugin的loader 就可以找到该 activity，并且借助Plugin的classloader加载。
+	PluginProcessPer 是一个 binder 实现类，其原型是 IPluginClient.Stub, 它的作用就是借助 其成员变量 mACM来分配坑位，还可以解析出具体的坑位的 activity，借助Plugin的loader 就可以找到该 activity，并且借助Plugin的classloader加载。同时也可以把该 binder 对象传给常驻进程，这可以设计一个进程的存活监听
 		1. 它具备一个 mACM:PluginContainers 的成员变量，并在构造函数中进行初始化。该类主要是处理坑位的，它持有整个程序的坑位，然后负责回收、分配、查询等工作，
 		坑位的状态 是通过 ActivityState 类保存，该类持有：plugin、container（坑位全名）、state（坑位占用情况）、activity（占用坑位的目标activity）。 PluginContainer 有一个mStates的成员变量，它是一个map，key是坑位的具体名称，value是ActivityState，可以从这里轻松查询到 坑位的占据情况
 		gradle分配的坑位策略是：
@@ -24,7 +24,7 @@ Replugin
 		备注：坑位是指 由gradle在编译期间动态向manifest注册的一些 activity，本身没有实现类，只是起到声明的作用，目的瞒过系统对activity的校验
 
 	插件的类因为是 PluginDexClassLoader 加载的，因为无法索引到 宿主中的框架的实用类，就如Replugin 这个类，插件的实现都是通过反射该类，获取到该类的 method。这些操作是在插件加载成功后，反射调用 Entry 类，把 PathCLassloader 传进来，从而在插件类反射，持有大量框架的实用方法，当需要的时候进行调用。
-	如上所属，PluginCommImpl 、 PluginLibraryInternalProxy，插件反射持有这些类的静态方法，进行调用。 而且这是一种巧妙地方法，避免应用中存在两种 classloader加载的不同类，确保插件框架的所有具体实现类都是由 PathListClassLoader 加载的，因为 PluginDexClassLoader 并不具备加载这些类的能力
+	如上所述，PluginCommImpl 、 PluginLibraryInternalProxy，插件反射持有这些类的静态方法，进行调用。 而且这是一种巧妙地方法，避免应用中存在两种 classloader加载的不同类，确保插件框架的所有具体实现类都是由 PathListClassLoader 加载的，因为 PluginDexClassLoader 并不具备加载这些类的能力
 
 	3. 调用 Pmbase.init() 方法
 	1. 这里会先判断当前进程是否是插件管理进程，这里假设应用配置了常驻进程，那么当程序初始化时，当前进程是UI进程，则调用 initForClient 方法，如果是常驻进程，则会调用 initForServer 方法
@@ -68,15 +68,49 @@ Replugin
 
 5. 调用 PMF.callAttach() 方法
 	1. 便利 Pmbase 里面的插件列表，给所有插件调用attach（mContext, mClassLoader, PluginCommImpl）
-	2. 如果当前插件是插件进程，就加载当前插件，调用 Plugin.load 方法，走 第五点 插件加载的方案
+	2. 如果当前进程是因为插件而启动的，就加载当前插件，如何知道当前进程是哪个插件启动的呢？这涉及到插件的安装，举个例子，当activity启动的时候，该activity是要开启插件进程的，那么需要为其分配进程坑位，在常驻进程中的 StubProcessManager 会保存该插件的信息，那么在插件进程走框架初始化流程的时候，就可以查询到当前插件的名字，从而可以对其进行加载。调用 Plugin.load 方法，走 第五点 插件加载的方案
 
 Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，因为该类加载的时候，还没有注入，并且注入的 ClassLoader 只负责加载某些类而已
 
 
 四、 插件的安装、更新
 
+1. 插件的安装时机是需要加载 插件中的类时，比如启动某插件的activity时，在启动activity之前，需要获取目标activity的类名、classloader等信息，所以需要该插件必须已经安装且加载，所以需要检测当前插件列表 PluginTable（该表在框架初始化时已经跟插件管理进程做了同步）是否有该插件的信息, 如果没有，就进入插件的安装流程。当然也有可能想进行覆盖安装，也会走 插件的安装流程（即更新）
+
+最终会调用到 PM.pluginDownloaded(path), 对插件用文件形式进行加锁，再调用 PluginProcessMain.getPluginHost().pluginDownloaded(path) 跨进程进行插件的安装， 在PmHostSvc中，又会调用 PluginManagerServer.install(path) 方法, 这里进入插件安装流程：
+1. 获取 path 这个路径对应的 apk 的 PackageInfo 信息， 包括mata信息、签名信息
+2. 首先检测是否开启 插件签名校验，如果签名校验开启，校验白名单中设置的签名是否匹配，校验失败，安装流程失败
+3.	然后从 PackageInfo 获取信息组装 一个PluginInfo，比如插件包名，如果mata信息有alias，记录别名，框架版本信息，标识 当前PluginInfo的状态为 NOT_INSTALL
+4. 从插件列表中检查是否有该插件的信息， 如果有，证明是打算覆盖安装了，需要校验版本号信息是否 >= 原插件的版本号，是的话，标记当前PluginInfo的 isPendingConver 为true，如果不是，校验失败，安装返回。
+5. 把 插件apk 移动或者复制到 安装路径，即插件的话是 app_p_a 目录，移动或者复制，这个可以在 HostConfig 里面配置，是否在安装过程中，删除掉 apk 文件，一般默认为删除
+6. 释放apk 里面的 so 库
+7. 判断该插件是否有旧版本，就是上述第4点从PluginTable中查询该插件信息。
+	1. 如果没有，证明是新插件，直接将当前的 PluginInfo 插进 PluginInfoList 里面，然后调用save，保存到插件信息到p.l文件中，方便以后恢复
+	2. 如果存在，代表更新插件，调用updateOrLater(oldInfo, newInfo) 方法，这里oldInfo 代表原来的插件信息，newInfo 代表要覆盖或者更新的新插件信息
+		1. 如果 oldInfo 已经有 待更新的 插件信息 即 getPendingUpdate 不为 null，只需要用 newInfo 覆盖掉该字段即可，pendingUpdate 是什么意思呢？因为正在运行的插件没办法再运行时替换掉，需要重启才能 走框架初始化流程，update 掉 oldInfo，而 newInfo 是需要保存起来，等待重启才生效，就保存在 oldInfo 的 pedingUpdate 中。
+		2. 如果没有pendingUpdate, 那么判断当前 插件是否处于 running 状态， 如果是 running 的话
+			1. 版本如果大于oldInfo，就将 newInfo 设置到 oldInfo 的 pendingUpdate中
+			2. 如果等于的话，就设置 oldInfo.pendingUpdate = null, 设置 oldInfo.pendingCover = newInfo
+		如果没有 running，直接调用 updateNow，这里会直接覆盖或更新 oldInfo 的dex、so、apk等文件， 并且将 newInfo 标识已经释放
+		从这里可以看到，如果是 新安装插件 或者 当前插件没有运行，会直接对 插件进行释放，而如果是等到重启后才能生效的插件，就要在运行时 释放插件的信息，有点耗时，所以 调用 Replugin.install（path）方法后，最好手动释放插件信息。
+	3. 将 上述变更的信息，保存到 PluginInfoList， 然后调用 save，保存到插件信息到p.l文件中，方便以后恢复
+
+上述已经在 插件管理进程安装完 插件了，其实就是保存好信息到 PluginInfoList 中，如果插件没安装过，或者没运行，可以提前释放，做的操作仅此而已。
+然后需要将 插件管理进程中 刚安装的新的插件信息 newInfo，调用 PmHostSvc.syncInstalledPluginInfo2All(newPluginInfo)
+1. 首先确定要 同步的 PluginInfo 是newInfo 还是 oldInfo，如果插件正在运行，不能更新 newInfo, 只需要更新 oldInfo 即可，因为 oldInfo的 pendingUpdate 包含 newInfo
+2. 在常驻进程内更新插件内存表 ，包括 Pmbase.mPlugins 和 PluginTable
+3. 调用 IPC.sendLocalBroadcast2AllSync(mContext, intent(ACTION:PmBase.ACTION_NEW_PLUGIN)) 通知其他进程更新插件列表。
+	1. 如果通知其他进程进行更新？ 还记得在框架初始化的过程中，initForClient 中，会尝试将当前进程 连接到常驻进程， 常驻进程持有当前进程的 IPluginClient 对象，由这里，就可以跨进程调用 PluginProcessPer.sendIntentSync 方法，然后再各自的进程 调用 LocalBroadcast.sendBroadcast 即可
+
+4. 关于各进程注册 PmBase.ACTION_NEW_PLUGIN action的广播时机是 application 调用 oncreate方法后， 通过 调用Replugin.onCreate 方法，然后调用 Pmbase.callAppCreate,在该方法里面就注册了该广播，注意只注册 非常驻进程的，其他的已经处理过了。该广播的会调用 Pmbase.newPluginFound 方法
+这里更新逻辑跟常驻进程一样，更新插件内存表 ，包括 Pmbase.mPlugins 和 PluginTable，然后再发送 RePluginConstants.ACTION_NEW_PLUGIN 的本地广播，这里可以供进程内部的开发者监听，插件安装的结果。
+
+至此，插件的安装完成。
+
 
 五、 插件的加载
+
+需要注意的是： 如果打开了一个 需要在插件进程运行的 activity，该插件实际的加载过程 将会涉及两次加载，第一次是在调用进程，获取到插件的信息，然后向 StubProcessManager 申请进程坑位，然后开启插件进程后，再框架初始化流程走到最后，调用 PMF.callAttach() 方法，查询进程的默认插件，即启动该进程的插件，对其进行加载，而插件的 activity 使用的资源 也应该是 插件进程的，而不是启动进程。
 
 1. 调用了 Plugin.load(int load, boolean cache):boolean 进行插件的加载， Plugin在第四点的时候就通过 PluginInfo 构造了。
 参数说明， load：有4个级别，分别是加载 PackageInfo、resource、classLoader、App(Context)
@@ -85,7 +119,7 @@ Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，
 	3. 如果使用缓存的话，直接用 Plugin 的静态变量缓存中读取，如果曾有过加载的话，就可能会命中，命中就返回true
 	4. 对 Plugin 加锁，其实就是加多了一个文件而已。 后续步骤加载完之后就解锁
 	5. 调用 Plugin对象的 doLoad 方法， 新建了一个 Loader 对象（核心类），其作为Plugin的一个成员变量，然后调用其 loadDex方法去加载apk。 
-	Loader类 持有一个插件的大部分信息、包括：mPackageInfo (包含插件包名、进程名、四大组件的信息、四大组件的Intent-fliter信息)、mComponents:ComponentList（封装好插件apk的四大组件的基本信息）、mPkgResources:Resource(插件apk的资源加载类)、
+	Loader类 持有一个插件的大部分信息、包括：mPackageInfo (包含插件包名、进程名、四大组件的信息、四大组件的Intent-fliter信息)、mComponents:ComponentList（封装好插件apk的四大组件的基本信息，通过这个类可以很容易找到插件 manifest 中声明的activity 的ActviityInfo信息）、mPkgResources:Resource(插件apk的资源加载类)、
 	mCladdLoader:DexClassLoader (插件的classloader)、mPkgContext：Context（其实是一个PluginContext，该类的构造函数会保存mPkgResource、mClassLoader、loader对象）
 
 	6. loadDex方法的方法逻辑如下：
@@ -152,8 +186,6 @@ Pmbase.class.classloader == PathClassLoader 并非是 新注入的classLoader，
 最后返回目标activity类，从而实现 坑位 和 目标插件 activity 的偷梁换柱，欺骗过系统。 为什么可以欺骗系统，看 第七的分析
 
 
-
-
 七、 为什么hook掉 ClassLoader 替换掉 坑位Activity，就可以启动Activity呢
 
 可以从 Activity 启动过程分析知道， 当我们启动一个 Activity 后， AMS会校验 我们传递的 Intent，检测它对应的 Activity 是否在 Manifest 存在，当然也可能是校验 Intent-filter 有没有找到对应的 activity， 如果找到了，就调用该Activity 所在应用的 ApplicationThread 进行activity的创建， 即 scheduleLaunchActivity。
@@ -162,3 +194,36 @@ AMS校验通过后，就会跨进程呼叫 需要启动的 activity 的进程，
 在ActivityClientRecord里面，将会创建一个 token，这是一个binder 对象，是AMS唯一标识一个activity的， 然后 利用ClassLoader、 Intent传回来的activity 类名，进行类加载，实例化，并且将 token attach到新创建的activity。
 
 上面这个过程，因为hook掉了ClassLoader，所以我们将 坑位activity对应的插件activity实例化，然后绑定 token， 这样就完成了欺骗系统的目的，因为AMS只认 token 这个标识符， 我们的插件activity也拥有这个token binder，所以能够正确接收生命周期调用
+
+
+
+八、关于 PluginContext 和 插件 Activity 如何调用 引用插件资源
+
+从第七节可以知道 hook 掉 activity 的原理，但是插件 activity 的 context 对象，并没有处理过，仍然是跟着系统流程，在 attachBaseContext 中绑定生命周期中构建的Context，这就会导致插件的资源无法加载。因为插件中的资源 需要 PluginContext 中的 mPkgResource 才能加载，插件中的类需要 mClassLoader这个 PluginDexClassloader 才能加载。所以如果不想办法去 替换掉 activity 中的 context 成 PluginContext，然后在 PluginContext overide 那些资源、类、启动的组件方法，从而让插件 activity 可以正在工作
+
+比较容易想到的是，直接在 Activity 的 attachBaseContext 方法中，将系统传入的 Context 偷梁换柱成 PluginContext，而 RePlugin 正是这样做的，它提供了 各种类型的 Activity 的代理类， 比如Activity的代理类 是 PluginActivity， 建议我们编写插件 Activity 的时候，继承这个 类，这样子， PluginActivity 就可以接管 来自activity 的各种请求。 当然考虑到入侵性太强，replugin 通过 gradle 插件，动态修改字节码文件，将 所有activity 全都继承于 PluginActivity，这样实现了 PluginContext 的注入。
+
+PluginActivity 除了注入了 PluginContext 方法，还代理了一些必要的生命周期方法，如onDestroy，为什么呢？因为 插件 activity 的生命周期回调，宿主是不知道的，需要告知宿主，比如当前 activity 已经 destroy 掉了，宿主需要将其坑位回收。关于插件 activity 是如何调用到 宿主中的类，因为 两个 ClassLoader 是不一致的，存在隔离。 这是上述 插件加载的时候提到的 Entry 类的初始化， 这是 Plugin 的初始化，会传入 宿主的 ClassLoader, 从而能够 反射 宿主的类，并且持有其 Method，从而能够调用。这样子就轻松的将 所有 Plugin 需要与 宿主交互的方法，代理出去了，而 Plugin 尽量保持简单，不做 复杂的工作，全部交由宿主去做，Plugin 只需要能够加载资源，接受生命周期回调即可，并且在适当时候，通知其生命周期的改变。毕竟 PluginManager、Pmbase、Loader、PluginContainer、PluginProcessPer 这些类全都是宿主程序管理的，插件不应该去交互。
+
+举个 PluginContext startActivity 的例子：
+
+PluginContext 重载了 startActivity(Intent) 方法，当 在插件内部调用 startActivity 时，就会将 处理代理到 Factory2.startActivity(this, intent)，而Factory2 其实是调用了 PluginLibraryInternalProxy.startActivity(context,intent)， 这个类就是宿主启动activity 都会经过的处理类。
+
+这里的逻辑是：
+1. 首先判断是否是用兼容模式启动，什么叫兼容模式呢？这里不是由用户指定的，当在该方法内部检测到 这个activity是 hook class，即宿主程序已经 在 manifest 中声明，就会再次调用这里的逻辑，然后使其走系统流程调用。因为不是要做额外的处理。
+2. 从 Intent 中获取 需要启动的 activity 名字，如果发现是 坑位activity， 直接按照系统流程走即可
+3. 获取 该 activity 的 plugin 名字
+4. 获取 activity 的进程 process
+4. 有了上面这些数据，就可以根据 第六点 走 startActivity 的流程了
+
+
+九、启动插件 Service
+
+1. 利用 PluginServiceClient 启动服务
+
+
+十、gradle host
+
+十一、gradle plugin
+
+十二、 javaAssist 动态修改字节码文件
