@@ -219,7 +219,37 @@ PluginContext 重载了 startActivity(Intent) 方法，当 在插件内部调用
 
 九、启动插件 Service
 
-1. 利用 PluginServiceClient 启动服务
+1. 无论是在插件中、还是宿主，最后都是调用 PluginServiceClient.startService 来启动服务
+	1. 首先 调用 getServiceComponentFromIntent（Intent） 获取 ComponentName 
+		1. 首先通过 classLoader 查找 插件名，这里会判断 当前Context的 classLoader 和 PluginCommImpl的Context 的classLoader 是否一致，因为 PluginCommImpl 的实例化是在 框架初始化流程中的，是宿主的上下文，而如果启动服务的上下文的classLoader 不是宿主的，那么绝对是插件的。
+		2. 如果不是宿主的classLoader，那么去 Pmbase 去根据 classLoader 查询插件名， 因为每一个插件的context 都是唯一全局的，其 PluginDexClassLoader 也是一样，这些在插件 加载的时候就已经 记录好，Plugin 的 PluginContext、classloader、packageInfo等信息。
+		3. 查找到 插件的名字
+
+		4. 调用 PluginClientHelper.getComponentNameByContext(context, intent.getComponent()) 来获取 ComponentName
+			1. 判断 IPC.getPackageName == component.packageName, 如果是的话，就是从宿主中启动的。否则已经填好了其他插件名。不用处理，已经设置好，直接Return
+			2. 否则 按 1.1 的方法找插件名，然后 组装 ComponentName(pluginName, className)， className 是Intent必有的，因为要指定启动的服务类
+	2. 获取 进程的 process， 根据Component指定的服务类名，通过 插件load过程中的 ComponentList 来查询 进程名字，然后根据进程名字，就可以换算到 process是 UI进程、常驻进程、还是插件进程，很简单。
+	3. 如果 没有查询到 process，那么启动服务按照系统流程来走
+	4. 获取到ComponentName，调用intent.setComponent(cn)
+	5. 接着调用 IPluginServiceServer pss = sServerFetcher(PluginServiceServerFetcher 类).fetchByProcess(process)， PluginServiceServerFetcher类 用来缓存 process 跟 IPluginServiceServer binder 的类，提供连接监听，如果远程 binder 断开了，将会自动清理掉 该process 的缓存。
+		1. 先从缓存中去查找 process 对应的 IPluginServiceServer，找到直接返回
+		2. 如果 目标 process 是常驻进程，直接 利用 PmHostSvc, 跨进程查找 IPluginServiceServer, 其实第一节已经说过，当创建 Pmbase -> PluginProcessPer 时，就创建了 PluginServiceServer 这个类对象，它就是运行在各个进程中，用来管理其进程的 service 的binder类
+		3. 如果不是常驻进程，那么启动 目标进程 process，当然如果已经启动就直接返回 IPluginClient, IPluginClient 就是 PluginProcessPer，然后调用 PluginServiceServerFetcher pps = IPluginClient.fetchServiceServer
+		4. 缓存上面获取到的 pss，并设置监听。
+	6. 获取到 服务对应的目标进程的 pss，就可以调用 pss.startService(intent, sClientMessenger:Messenger); 走到 PPS 类的 retrieveServiceLocked 方法中
+		1. 调用 retrieveServiceLocked(intent)，获取到 ServiceRecord
+			1. 先查询缓存，缓存有的话，直接返回。
+			2. 继续根据 ComponentList，去根据 Service的类名，返回 ServiceInfo 信息，然后封装成 ServiceRecord
+		2.  判断是否已加载过 这个ServiceRecord 对应的 Service对象，如无则创建它。一般新启动一个服务都是 null 的。 如果没有启动过，切换到 主线程（UI线程），调用 installServiceLocked（ ServiceRecord ）
+			1. 从 ServiceRecord 中，获取到 pluginName， 然后查询到其 classLoader，然后加载 Service 对象，调用 attachBaseContextLocked(service, pluginContext)
+				1. 反射调用 service 对象的 attachBaseContext，因为是protect的
+				2. 反射设置 service 的 application 字段 为 pluginContext.getApplication()
+			2. 调用 service.onCreate() 方法， 可以看到，Replugin 根本没有走系统流程，而是将 Service 当普通类处理。那如何确保 服务进程的优先级呢？看下面一点分析
+			3. 根据 当前进程，选择 坑位服务，坑位服务应该是 gradle 生成的，然后启动它，这就让 当前进程变成服务进程了。 这个坑位服务什么也没做，只是提高进程优先级而已，replugin 利用这点，将众多服务变成了一个， 当初设计者曾说，服务的启动可能很多很多，而 activity 顶到天就 十几个，并且服务运行在后台，很消耗资源，这里通过只启动一个服务的技巧，然后手动回调生命周期，解决这种性能问题。 其实 AMS 也是这样管理服务的，而 Replugin 将 AMS 换成了 pss 而已
+		3. 缓存好 ServiceRecord
+		4. 利用 handler 切换到 主线程，运行 服务的 onStartCommand 方法
+
+上述就是 Replugin 启动服务的流程。
 
 
 十、gradle host
