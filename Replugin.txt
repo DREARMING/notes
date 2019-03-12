@@ -252,8 +252,44 @@ PluginContext 重载了 startActivity(Intent) 方法，当 在插件内部调用
 上述就是 Replugin 启动服务的流程。
 
 
-十、gradle host
+十、 ContentProvider
+原理： ContentProvider 的生命周期很简单，Replugin 实现调用插件的 ContentProvider，也是借助 坑位来实现的，在 调用系统 api之前，先将 url 的 authority 转变成
+坑位 provider，然后让系统启动坑位 provider，因为 所有坑位 provider 都是继承于 PluginPitProviderBase，在这里解析接收到的 url，因为 newUrl 包含 目标 provider 的插件名 和 authority，我们查找到目标 provider后，通过用插件的 classLoader，load出 provider 对象，然后将方法代理给 目标 provider 即可
 
-十一、gradle plugin
+这里只分析一种情况，即 在 插件中访问插件中的 ContentProvider，然后就可以分析， Replugin 对 ContentProvider 的支持约束，也不能说是约束，更多是使用技巧，官方文档没有的操作说明
 
-十二、 javaAssist 动态修改字节码文件
+流程分析：
+1. 启动 插件中的 Provider，因为是直接调用 context.getContentResolver().xxx 来访问 ContentProvider 的 增产改查方法。又因为 PluginContext，并没有覆写 getContentResolver，做代理工作，因为这里必然会走系统流程，但是因为 访问的 contentProvider 没有注册，必然发生错误。 而 Replugin 通过 plugin gradle 修改字节码，将 context.getContentResolver 调用， 改成了 PluginProviderClient 的相关方法，这样子，就从 PluginProviderClient 开始 走 框架的 ContentProvider 流程。 就以简单的 insert方法来做解释
+
+2.	调用 PlulginProvider.insert(Context c, Uri uri, ContentValues values) 方法
+	1. 调用 toCalledUri(c,uri) : Uri, 用来构造一个新的 ContentProvider 的 authority，我们知道， authority 是系统对 Provider 的标识，因此，我们要借助 坑位Provider authority 去瞒过系统，让它启动坑位 Provider，然后直接在 坑位Provider里面做代理即可
+		1. 调用 fetchPluginByContext(c, uri) 来返回插件名字，该方法内部，通过 context 的 classloader 来查找当前 Context 对应的插件，比较简单，也是借助 Pmbase来查找的，获取到插件名字后直接返回。
+		2. 找到插件名字后，如果是 宿主的话，直接走 原生流程即可，不需要改造 authority，如果插件名字不存在，有可能没有安装，这里跟 Activity 不一样，不自动加载插件，而是直接报错
+		3. 获取到插件名字， 再调用 toCalledUri(Context context, String plugin, Uri uri, int process) 方法，构造 新的 Uri
+			1. 如果 原先请求的 uri 的 authority 指定的就是 坑位 Provider，这里不需要做额外的处理。
+			2. 根据  plugin 和 authority，查询目标 ContentProvider 是否是 跨进程的，如果是跨进程调用的话，需要 选择对应进程的坑位 Provider
+			3. 根据原来的 ContentProvider uri，组装成下面这种 有规则地 uri，我们可以看到，现在 uri 的 authority变成了对应进程的 坑位 provider的authority，
+			但是 segment保留了原先的 ContentProvider 的 authority，并且第一个 segment里面还包括 plugin 字段。这设计可以让我们启动 坑位 provider后，很轻松获取到原来的ContentProvider 的请求数据，然后做代理即可。
+			// from => content://                                                  com.qihoo360.contacts.abc/people?id=9
+        	// to   => content://com.qihoo360.mobilesafe.Plugin.NP.UIP/plugin_name/com.qihoo360.contacts.abc/people?id=9
+        	String newUri = String.format("content://%s/%s/%s", au, plugin, uri.toString().replace("content://", ""));
+    2. 调用系统流程的  c.getContentResolver().insert， 到这里，就会启动 坑位 Provider，所有的坑位Provider 都是继承于 PluginPitProviderBase， 并且没有实现insert方法，所以调用 PluginPitProviderBase.insert
+    	1. PluginProviderHelper.toPluginUri(Uri) 去获取 PluginUri(plugin_name, authority(原先的authority))，就是把坑位 Provider 的 uri 做解析工作，取出 segemnt段落，然后进程封装
+    	2. 然后调用 getProvider，这里就是利用 插件名 去查找到 classLoader，然后利用原先的 authority 去查找到 对应的 Provider 对象，然后反射出 Provider 对象，返回即可
+    	3. 然后把 坑位Provider 的参数 传给 目标 Provier，完成调用的过程。
+
+上面一个很关键的地方，是根据 Context 来查找 目标ContentProvider 的插件，如果是宿主调用插件的 Provider，单纯在host 里面调用 PluginProviderClient.insert(context,uri,cv), 这里因为context仍然是 host 的context，是无法查找到插件 Content，所以需要 调用 Replugin.fetchContext(pluginName) 来获取到 目标 ContentProvider的插件Context，这样子就可以构造出 正确的 newUri，从而走上 坑位Provider 的调用逻辑。
+同样，在插件a，调用插件b也一样，也需要借助 对应插件的Context ，来实现ContentProvider 的调用。
+
+ 
+十一、BroadcastReceiver
+
+
+
+
+
+十二、 gradle host
+
+十三、gradle plugin
+
+十四、 javaAssist 动态修改字节码文件
