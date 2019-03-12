@@ -285,11 +285,122 @@ PluginContext 重载了 startActivity(Intent) 方法，当 在插件内部调用
 十一、BroadcastReceiver
 
 
-
-
-
 十二、 gradle host
 
+
 十三、gradle plugin
+
+Replugin 的 plugin gradle 插件主要是解决插件 中的代码调用问题，就如 第 八 点所说， 插件的 Context，必须是 PluginContext，这样才能正确 查找到 插件中的资源，
+然后 attachBaseContext 方法，是系统流程中绑定的，我们需要让 插件Activity 集成自 PluginActivity, 然后在里面重载 attachBaseContext 方法，从而将 context 换成 PluginContext，从而具备访问 插件资源的能力。
+
+还有，第十点讨论到的， 插件中调用 getContentResolver.xxx 方法，将会直接走系统流程，没有构造 坑位Provider 的 authority，就会查找不到 该ContentProvider而报错。
+
+上述两点，如果要用户去注意的话，比如让用户自己继承PluginActivity，自动将 getContentResolver 的代码 换成 PluginProviderClient 的相关调用，Replugin 认为这种入侵性太大了，所以 Replugin 借助 gradle 插件，利用字节码技术去修改 class 代码，换成正确的调用。
+
+plugin gradle 插件主要用 字节码技术 修复下列相关代码的调用：
+1. 所有在 manifest 中声明的 Activity，无论是什么类型的Activity，都要改变其继承关系，换成相对应的 XXPluginActivity
+2. 对于 LocalBroadcastManager 的调用， 转换成 PluginLocalBroadcastManager的调用
+3. 对于 getContentResolver.xxx 的调用，转成 PluginProviderClient.xxx 的调用
+4. 对于 Resource.getIndentifier 的调用， 将其第三个参数的 defPackage 转成 插件的包名
+
+通过上述的 class 文件修复， 插件中的代码调用就会走上 Replugin 框架的调用流程，从而具备正确的执行能力
+
+在分析 gradle 插件的执行流程时，先说一下 Transform 这个类类
+
+Transform 是 Android Gradle API ，允许第三方插件在class文件转为dex文件前操作编译完成的class文件，这个API的引入是为了简化class文件的自定义操作而无需对Task进行处理。在做代码插桩时，本质上是在merge{ProductFlavor}{BuildType}Assets Task 之后，transformClassesWithDexFor{ProductFlavor}{BuildType} Transform 之前,插入一个transformClassesWith{YourTransformName}For{ProductFlavor}{BuildType} Transform，此Transform中完成对class文件的自定义操作（包括修改父类继承，方法中的super方法调用，方法参数替换等等，这个class交给你，理论上是可以改到怀疑人生）。
+
+每个Transform其实都是一个gradle task，Android编译器中的TaskManager将每个Transform串连起来，第一个Transform接收来自javac编译的结果，以及已经拉取到在本地的第三方依赖（jar. aar），还有resource资源，注意，这里的resource并非android项目中的res资源，而是asset目录下的资源。这些编译的中间产物，在Transform组成的链条上流动，每个Transform节点可以对class进行处理再传递给下一个Transform。我们常见的混淆，Desugar等逻辑，它们的实现如今都是封装在一个个Transform中，而我们自定义的Transform，会插入到这个Transform链条的最前面。
+
+Transform 有两种输入，一种是消费型的，当前Transform需要将消费型型输出给下一个Transform，另一种是引用型的，当前Transform可以读取这些输入，而不需要输出给下一个Transform，比如Instant Run就是通过这种方式，检查两次编译之间的diff的。
+
+Transform 的消费型输出将会作为 下一个 Transform 的消费型输入， Transform 的输出目录，一般是 /build/intermediates/transforms/{TransForm.getName}/{buildType}
+下一个TransForm 就会从这里读取数据作为输入。所以不管怎么操作，请将操作最后的结果保存在这里。
+
+Transform 详细内容参考： https://mp.weixin.qq.com/s/s4WgLFN0A-vO0ko0wi25mA
+
+plugin gradle 插件的 流程分析：
+
+1. 首先调用 project.createExtensions, 创建 repluginPluginConfig 这个 extension，在gradle 脚本就可以应用这个extension 做一些配置，这里提供配置的选项有：
+def ignoredInjectors = []  //选择要忽略的 类字节码处理器， 即上述所说的 4点代码修复，他们会对应一个个处理器
+def ignoredActivities =[]	//选择不需要处理继承关系的 Activity
+... 具体可以查看 ReClassPlugin 这个类的内部类 ReClassConfig
+
+2. 获取 AppExtension, def android = project.extensions.getByType(AppExtension), 然后为每一个 Variant 添加 RepluginTransform，即每一个构建产物都需要做字节码修复
+android.applicationVariants.all { variant ->
+	def transform = new ReClassTransform(project)
+    // 将 transform 注册到 android, 这样，在 transformClassesWithDexFor{buildType} 之前，就会先执行 ReClassTransform 
+    android.registerTransform(transform)
+}
+ 
+3. ReClassTransform 需要 override 以下方法：
+getName代表 该Transform的名字，会影响该 Task的名字和输出目录
+getInputTypes 代表Transform 要处理的资源类型，一般设置为：CONTENT_CLASS， 处理class文件，因为我们要修复的就是 class文件
+getScopes 代表 Transform 要处理 scope，一般是 SCOPE_FULL_PROJECT，整个 Project
+
+4. 当 gradle 执行这个 Transform 时，就会调用 该类的 void transform(Context context,Collection<TransformInput> inputs,Collection<TransformInput> referencedInputs,
+TransformOutputProvider outputProvider,boolean isIncremental) 方法
+	1. 首先读取 repluginPluginConfig， 读取一些配置参数，比如 ignoreActivity、 ingoreInjectors
+	2. 调用 File rootLocation = outputProvider.rootLocation ，这个 rootLocation 的位置在：\build\intermediates\transforms\{TransForm.getName}\{buildType}, 这就是该Transform的 处理目录
+	3. 调用 includedInjectors 方法，返回所有预设置的 Injector，但是不包含 repluginPluginConfig的 ingoreInjectors。
+	这些Injector 包括：
+	LoaderActivityInjector、LocalBroadcastInjector、ProviderInjector、GET_IDENTIFIER_INJECTOR，分别修复一种 代码调用问题。
+	4. 如果 injectors 不为空，需要做 字节码处理，就调用 doTransform(inputs, outputProvider, config, injectors) 方法，正式进入字节码处理过程。
+		1. Object pool = initClassPool(inputs) 初始化 ClassPool，ClassPool 是javaassit 中的类加载池，可以为其插入多个 classPath，它就能访问到 这些path的 class，生成CtClass，我们就可以利用这个类，做很多字节码处理的工作
+			1. def pool = new ClassPool(true)，首先new一个 ClassPool，然后调用  Util.getClassPaths，为pool 添加多个 classPath，这里我们可以想想，因为 ClassPool 默认只会加载 jvm 对应的类，即 java的jar包，但是 Android 的classPath，我们的类的目录，第三方jar、arr的类文件，它是查找不到的，所以 Util.getClassPath 的工作就是根据 inputs 这个 transform 的所有 class 输入源，获取到 classPath，必要时候需要解压处理。
+				1. 首先调用 GlobalScope.getAndroidBuilder().getTarget().getPath(IAndroidTarget.ANDROID_JAR) 获取到 android.jar 的路径，然后将其添加到 classpath 中
+				2. 添加原始项目中的 classPathList, 调用 getProjectClassPath(Project project,Collection<TransformInput> inputs,Set<String> includeJars, Map<String, String> map)， 参数解析：
+				inputs 代表着上一个 Transform 的 类输入源，这里应该是第一个Transform，所以应该是指各个 类文件的存储目录，所以可以猜想到，可以从这些输入源中 构造出 classpath 出来
+				includeJars 这个 set 是用来记录 输入源中有哪些是 jar类型的
+				map 是一个用来记录 jar 类型输入源的 路径信息，key是原始 jar文件的 路径信息，value 是更改后的，如果没有发生过更改，key == value，发生更改一般是因为当前jar输入源并不在 当前项目目录，是从gradle build-cache 中读取的，需要引入进本项目，这样子，路径信息就会发生变更
+					1. 方法中的处理逻辑也比较简单，如果是 Diectory 的 类输入源，只需要将这个 Directory 添加进 classPath 即可。
+					2. 如果是 jar 类型，需要判断 当前 jar 输入源 是否在 本model下，如果不在的话，需要将实际的输入源，解压到 \build\intermediates\exploded-aar\15041c8b720f92d61547bbe718982b1dd5273b91\class 这个目录，其中 中间那串码是原 jar的路径 的 sha1 摘要，然后将解压后的 这个目录添加到 classPath 中，因为 与原来的jar 路径发生了变更，需要用 map 记录一下，因为后面需要重新将 这些处理过的 class文件进行打包， 这里知道 发生改变路径，只要压缩 解压后的这个目录里即可。
+		2. 遍历 inputs，然后让遍历 injectors 执行 injector 的 injectClass(pool, dirAfterUnzip, config)方法，第二个参数就是 输入源的jar解压目录，或者是 Directory类型输入源的的目录路径，下面分析两个 injector，一个是 PluginActivity的 继承替换 injector -> LoaderActivityInjector， 还有一个是 PluginProviderClient 替换 ContentResolver 这个类的 Injector -> ProviderInjector
+			1. LoaderActivityInjector 的 injectClass(ClassPool pool, String dir, Map config)
+				1. 读取 manifest 中的 activity 列表，返回 String[]，然后遍历 当前activity 的 名字列表，看看是在 dir 中找到相应的 Activity 的class文件
+				2. 找到之后，通过 pool.get(fileInputStream) 生成这个 Activity 类的 CtClass 对象，然后利用这个 CtClass 获取其 父类，查看是否是 LoaderActivityInjector 标注的 需要替换 的Activity, 如果不是，再查询其父类的父类，直至找到
+				3. 然后调用  ctCls.setSuperclass(targetSuperCls)，ctCls的父类就是要替换的 Activity 类，这里将其继承关系 映射到 targetSuperClass，比如原生是 Activity，那么映射之后就是 PluginActivity
+				4. 然后搜寻 ctCls 对 super 方法的引用，需要调用 如下代码进行字节码 替换。
+				ctCls.getDeclaredMethods().each { outerMethod ->
+                    outerMethod.instrument(new ExprEditor() {
+                        @Override
+                        void edit(MethodCall call) throws CannotCompileException {
+                            if (call.isSuper()) {
+                                if (call.getMethod().getReturnType().getName() == 'void') {
+                                    call.replace('{super.' + call.getMethodName() + '($$);}')
+                                } else {
+                                    call.replace('{$_ = super.' + call.getMethodName() + '($$);}')
+                                }
+                            }
+                        }
+                    })
+                }
+                5. ctCls.writeFile，把修改后的 class 重写回 class文件到原目录。至此，字节码已经完成了修复
+
+            2. ProviderInjector ，因为没有manifest可以查找到具体需要改哪些类文件了，该注入器，通过遍历指定 类输入源的 dir来查找所有类，查看类里面的所有方法，是否存在 有表达式 是 调用 ContentResolver 的相关表达式，然后调用 ProviderExprEditor 来进行字节码修复，查找和修复代码如下：
+
+    		void edit(MethodCall m) throws CannotCompileException {
+        		String clsName = m.getClassName()
+        		String methodName = m.getMethodName()
+
+        		if (clsName.equalsIgnoreCase('android.content.ContentResolver')) {
+            		if (!(methodName in ProviderInjector.includeMethodCall)) {
+                		// println "跳过$methodName"
+                		return
+            	}
+            	replaceStatement(m, methodName, m.lineNumber)
+        		}
+    		}
+
+    		def private replaceStatement(MethodCall methodCall, String method, def line) {
+        		if (methodCall.getMethodName() == 'registerContentObserver' || methodCall.getMethodName() == 'notifyChange') {
+            		methodCall.replace('{' + PROVIDER_CLASS + '.' + method + '(com.qihoo360.replugin.RePlugin.getPluginContext(), $$);}')
+        		} else {
+            		methodCall.replace('{$_ = ' + PROVIDER_CLASS + '.' + method + '(com.qihoo360.replugin.RePlugin.getPluginContext(), $$);}')
+        		}
+        		println ">>> Replace: ${filePath} Provider.${method}():${line}"
+    		}
+
+    3. repackage() 重新把 那些 jar 类型的 输入源，打成jar包
+    4. copyResult(inputs, outputProvider)， 将input所有的类文件，转移到 \build\intermediates\transforms\{TransForm.getName}\{buildType} 这个目录，做为下一个Transform的输入源，至此，transform 逻辑执行完毕
 
 十四、 javaAssist 动态修改字节码文件
